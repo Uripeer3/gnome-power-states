@@ -85,6 +85,8 @@ make uninstall
 
 ### Architecture Overview
 
+For a detailed breakdown of active processes, `systemd-logind` / UPower / Polkit checks, event flows, internal state ownership, and how extension workarounds map to an eventual upstream GNOME Settings implementation, see **[docs/architecture.md](docs/architecture.md)**.
+
 ```text
 gnome-power-states/
 ├── metadata.json                # GNOME 45–51+, user + unlock-dialog session modes
