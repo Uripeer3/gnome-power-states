@@ -204,12 +204,6 @@
       <description>Battery percentage at or below which Low Battery state activates when low-battery-mode is set to percentage.</description>
     </key>
 
-    <key name="remember-manual-profile" type="b">
-      <default>false</default>
-      <summary>Remember manual Quick Settings profile changes</summary>
-      <description>When disabled (recommended), manual Power Mode changes in GNOME Quick Settings are temporary overrides until the next power state transition. When enabled, manual changes become the new default for AC or Battery.</description>
-    </key>
-
     <key name="pause-media-on-suspend" type="b">
       <default>true</default>
       <summary>Pause media players before lid-triggered suspend</summary>

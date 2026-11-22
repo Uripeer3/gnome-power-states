@@ -12,7 +12,7 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 
 - It defines **what happens automatically upon a physical power transition** (plugging in AC, unplugging to battery, or entering/leaving low battery).
 - If you manually switch Power Mode in GNOME Quick Settings (for example, switching to *Performance* on battery for a build, or *Power Saver* on AC during a quiet call), **your manual choice is respected for as long as you remain in that power state**.
-- Automation steps in again only on the next physical transition — or if you explicitly opt into *"Remember Manual Quick Settings Changes"* in Preferences.
+- Automation steps in again only on the next physical transition.
 
 ---
 
@@ -25,11 +25,10 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 - **Automatic Suspend (Synced with GNOME Settings)**: Single compact row (`Action` + `Delay`) synced directly with GNOME's native `org.gnome.settings-daemon.plugins.power` keys (`sleep-inactive-ac-*` and `sleep-inactive-battery-*`), plus an optional temporary override while in *Low Battery* that restores cleanly on exit.
 - **Screen Blank Delay**: Per-state `org.gnome.desktop.session` `idle-delay` (optional; defaults to *Leave Unchanged* and restores your original baseline if the extension is disabled).
 
-### Global Policies & Advanced
-- **Separated Sleep Mode**: *"When Sleeping, Enter"* (*Standby*, *Suspend, then Hibernate*, or *Hybrid Sleep*) is configured once globally and transparently indicates when Hibernate / Hybrid Sleep are not configured on the system.
-- **Low Battery Trigger**: Simple *Default (X%)* (using UPower's system threshold) or *Custom* percentage, with an inline info popover explaining the difference.
-- **Remember Manual Quick Settings Changes**: Off by default so manual overrides stay temporary until the next power transition.
-- **Advanced (collapsed by default)**: *Unplug-While-Closed Delay* (*Default (3s)* or *Custom* with info popover), *Show Transition Notifications*, and *Pause Media Players on Suspend*.
+### General & Advanced
+- **Separated Sleep Mode**: *"Lid-Close Sleep Mode"* (*Standby*, *Suspend, then Hibernate*, or *Hybrid Sleep*) is configured once globally and transparently explains when Hibernate / Hybrid Sleep are not configured on the system.
+- **Low Battery Level**: Simple *Default (X%)* (follows UPower's system threshold) or *Custom* percentage (extension-only; does not edit `/etc/UPower/UPower.conf` or GNOME's system alerts).
+- **Advanced (collapsed by default)**: *Unplug Delay When Closed* (*Default (3s)* or *Custom* extension-only timer), *Transition Notifications*, and *Pause Media on Suspend*.
 - **Contextual Conflict Guardrails**: Surfaces an inline `Adw.Banner` in Preferences only when settings conflict (e.g., Screen Blank set at or after Automatic Suspend, or Battery Lid set to *Do Nothing*).
 - **Reliable AC Detection**: Subscribes to **all** UPower `LINE_POWER` devices (plus hotplug events) alongside `DisplayDevice`, avoiding missed AC reconnects on laptops with battery charge thresholds or multiple USB-C PD ports.
 

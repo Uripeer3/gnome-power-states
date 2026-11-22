@@ -172,30 +172,12 @@ export default class PowerStatesExtension extends Extension {
         this._reconcile(this._upowerWatcher.getReading(), editedActiveProfile);
     }
 
-    _onExternalProfileChange(newProfile) {
+    _onExternalProfileChange() {
         if (this._destroyed || !this._settings || !this._lastPolicyState)
             return;
 
         // Always respect the user's manual Quick Settings selection while in this state.
         this._manualOverrideActive = true;
-
-        const globalConfig = readGlobalConfig(this._settings);
-        if (!globalConfig.rememberManualProfile)
-            return;
-
-        // Only remember manual choices for AC / Battery (never overwrite Low Battery)
-        if (this._lastPolicyState === 'ac' || this._lastPolicyState === 'battery') {
-            const key = `${this._lastPolicyState}-power-profile`;
-            if (this._settings.get_string(key) !== newProfile) {
-                this._settings.set_string(key, newProfile);
-                this._notify(
-                    _('Saved %s as the default Power Mode for %s.').format(
-                        newProfile,
-                        this._lastPolicyState === 'ac' ? _('Plugged In') : _('On Battery')
-                    )
-                );
-            }
-        }
     }
 
     _onLapRetry() {

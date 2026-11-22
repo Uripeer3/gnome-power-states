@@ -558,7 +558,7 @@ class PrefsController {
         const lowBatInfoBtn = createInfoButton(
             _('About Low Battery Level'),
             _(
-                'Default uses UPower’s system low-battery threshold (currently %s in /etc/UPower/UPower.conf), matching GNOME’s built-in low-battery alerts.\n\nCustom activates the Low Battery state at the percentage you choose here.'
+                'Default follows UPower’s system low-battery warning level (currently %s in /etc/UPower/UPower.conf), staying in sync with GNOME’s built-in alerts.\n\nCustom triggers this extension’s Low Battery policy at your chosen percentage. It runs inside the extension only and does not edit /etc/UPower/UPower.conf or GNOME’s system alerts.'
             ).format(this._upowerPct ? `${this._upowerPct}%` : _('the system default'))
         ).button;
 
@@ -623,7 +623,7 @@ class PrefsController {
         const graceInfoBtn = createInfoButton(
             _('About Unplug Delay When Closed'),
             _(
-                'Extension default: %d seconds (this is a Power States setting, not a system setting).\n\nPrevents instant sleep if a power cable is briefly bumped while the laptop lid is already closed. Choose Custom to set 0–30 seconds.'
+                'Extension-only timer (default: %d seconds; does not modify any system setting).\n\nIf power is unplugged while the lid is already shut, the extension waits this long before running your On Battery lid action, and cancels if you plug back in or open the lid.'
             ).format(DEFAULT_UNPLUG_GRACE_SECONDS)
         ).button;
 
@@ -699,19 +699,6 @@ class PrefsController {
             Gio.SettingsBindFlags.DEFAULT
         );
         this._advancedExpander.add_row(this._pauseMediaRow);
-
-        // Save Quick Settings Changes (opt-in power-user option, tucked cleanly in Advanced)
-        this._rememberRow = new Adw.SwitchRow({
-            title: _('Save Quick Settings Changes'),
-            subtitle: _('Make manual Quick Settings changes the new default for this state'),
-        });
-        this._settings.bind(
-            'remember-manual-profile',
-            this._rememberRow,
-            'active',
-            Gio.SettingsBindFlags.DEFAULT
-        );
-        this._advancedExpander.add_row(this._rememberRow);
 
         this._globalGroup.add(this._advancedExpander);
         this._page.add(this._globalGroup);
