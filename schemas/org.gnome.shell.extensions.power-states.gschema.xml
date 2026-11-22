@@ -16,14 +16,13 @@
 
     <key name="ac-lid-action" type="s">
       <choices>
-        <choice value="system"/>
         <choice value="nothing"/>
         <choice value="lock"/>
         <choice value="blank"/>
         <choice value="suspend"/>
         <choice value="hibernate"/>
       </choices>
-      <default>'system'</default>
+      <default>'suspend'</default>
       <summary>Lid-close action when plugged in</summary>
       <description>Action performed when the laptop lid is closed while connected to AC power.</description>
     </key>
@@ -75,14 +74,13 @@
 
     <key name="battery-lid-action" type="s">
       <choices>
-        <choice value="system"/>
         <choice value="nothing"/>
         <choice value="lock"/>
         <choice value="blank"/>
         <choice value="suspend"/>
         <choice value="hibernate"/>
       </choices>
-      <default>'system'</default>
+      <default>'suspend'</default>
       <summary>Lid-close action on battery</summary>
       <description>Action performed when the laptop lid is closed while running on battery.</description>
     </key>
@@ -134,14 +132,13 @@
 
     <key name="low-battery-lid-action" type="s">
       <choices>
-        <choice value="system"/>
         <choice value="nothing"/>
         <choice value="lock"/>
         <choice value="blank"/>
         <choice value="suspend"/>
         <choice value="hibernate"/>
       </choices>
-      <default>'system'</default>
+      <default>'suspend'</default>
       <summary>Lid-close action on low battery</summary>
       <description>Action performed when the laptop lid is closed while on low battery.</description>
     </key>
@@ -219,10 +216,20 @@
       <description>Sends an MPRIS Pause command to active media players before suspending or hibernating on lid close.</description>
     </key>
 
+    <key name="unplug-while-closed-mode" type="s">
+      <choices>
+        <choice value="default"/>
+        <choice value="custom"/>
+      </choices>
+      <default>'default'</default>
+      <summary>Unplug-while-closed grace delay mode</summary>
+      <description>Use the built-in default grace delay (3 seconds) or a custom number of seconds.</description>
+    </key>
+
     <key name="unplug-while-closed-grace-seconds" type="i">
       <range min="0" max="30"/>
       <default>3</default>
-      <summary>Grace delay when unplugged with lid already closed (seconds)</summary>
+      <summary>Custom grace delay when unplugged with lid already closed (seconds)</summary>
       <description>Delay before applying the battery lid-close action if AC power is disconnected while the laptop lid is already closed.</description>
     </key>
 

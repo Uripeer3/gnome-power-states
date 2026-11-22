@@ -122,13 +122,13 @@ test('resolveProfileTransition: Leave Unchanged never writes profile', () => {
 });
 
 // 3. Lid-close decisions & external monitor clamshell protection
-test('resolveLidDecision: system delegates without inhibitor', () => {
+test('resolveLidDecision: suspend acquires inhibitor and resolves sleep mode', () => {
     const d = resolveLidDecision({
-        stateConfig: { lidAction: 'system', lidIgnoreExternalMonitor: false },
+        stateConfig: { lidAction: 'suspend', lidIgnoreExternalMonitor: false },
         externalMonitorConnected: false,
     });
-    assertEqual(d.needsInhibitor, false, 'no inhibitor needed');
-    assertEqual(d.actionOnClose, 'system', 'delegated');
+    assertEqual(d.needsInhibitor, true, 'inhibitor held for managed policy');
+    assertEqual(d.actionOnClose, 'suspend', 'suspends on close');
 });
 
 test('resolveLidDecision: Do Nothing holds inhibitor and takes no action', () => {

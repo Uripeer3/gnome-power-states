@@ -2,20 +2,22 @@
 // GNOME Power States Preferences — Design A (GNOME HIG Single-Page Scoped State Bar)
 //
 // Layout:
-//   Group 1: Automatic Behavior by Power State
-//            Header suffix: [ Plugged In | On Battery | Low Battery ] toggle bar
-//            - Conditional conflict Adw.Banner
-//            - Power Mode
-//            - When Laptop Lid Closes + "Even when an external monitor is connected"
-//            - Automatic Suspend (Action + Delay, synced with GNOME Settings)
-//            - Screen Blank Delay
-//   Group 2: Global Policies & Guardrails (configured once, never duplicated per tab)
-//            - When Sleeping, Enter (only when >1 sleep mode supported)
-//            - Low Battery Trigger (UPower Warning Level vs Custom Percentage)
-//            - Remember Manual Quick Settings Changes
-//            - Pause Media Players on Suspend
-//            - Unplug-While-Closed Grace Delay
-//            - Show Notifications
+//   1. Automatic Behavior by Power State
+//      - Full-width [ Plugged In | On Battery | Low Battery ] Adw.ToggleGroup
+//      - Conditional conflict Adw.Banner
+//      - Power Mode
+//      - When Laptop Lid Closes (concrete actions, dynamic subtitle)
+//      - Even When an External Monitor Is Connected
+//      - Automatic Suspend (single row: Action dropdown + conditional Delay dropdown)
+//      - Screen Blank Delay
+//   2. Global Policies
+//      - When Sleeping, Enter (always visible; explains if hibernate/hybrid are unavailable)
+//      - Low Battery Trigger (Default (X%) / Custom + inline % + info popover)
+//      - Remember Manual Quick Settings Changes
+//      - Advanced (collapsed Adw.ExpanderRow):
+//          - Unplug-While-Closed Delay (Default (3s) / Custom + inline s + info popover)
+//          - Show Transition Notifications
+//          - Pause Media Players on Suspend
 
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
@@ -27,9 +29,16 @@ import {
 } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 import { probeSystemCapabilities } from './lib/capabilities.js';
-import { SCHEMA_ID, readGlobalConfig, readStateConfig } from './lib/configStore.js';
+import {
+    DEFAULT_UNPLUG_GRACE_SECONDS,
+    SCHEMA_ID,
+    readGlobalConfig,
+    readStateConfig,
+} from './lib/configStore.js';
 import { detectPolicyConflicts } from './lib/policyEngine.js';
 import { readUPowerPercentageLow } from './lib/upowerConfig.js';
+
+const GSD_POWER_SCHEMA = 'org.gnome.settings-daemon.plugins.power';
 
 const STATE_TABS = [
     { id: 'ac', label: 'Plugged In', icon: 'ac-adapter-symbolic' },
@@ -45,30 +54,55 @@ const PROFILE_OPTIONS = [
 ];
 
 const LID_OPTIONS = [
-    { id: 'system', label: 'System Default' },
-    { id: 'nothing', label: 'Do Nothing' },
-    { id: 'lock', label: 'Lock Screen' },
-    { id: 'blank', label: 'Turn Off Screen' },
+    {
+        id: 'suspend',
+        label: 'Suspend',
+        subtitle: 'Put the laptop to sleep when the lid closes',
+    },
+    {
+        id: 'nothing',
+        label: 'Do Nothing',
+        subtitle: 'Keep the laptop running with the lid closed',
+    },
+    {
+        id: 'lock',
+        label: 'Lock Screen',
+        subtitle: 'Lock your session and keep the laptop running',
+    },
+    {
+        id: 'blank',
+        label: 'Turn Off Screen',
+        subtitle: 'Power off the display without suspending or locking',
+    },
+    {
+        id: 'hibernate',
+        label: 'Hibernate',
+        subtitle: 'Save memory to disk and power off',
+    },
+];
+
+const IDLE_ACTION_AC_BAT = [
+    { id: 'nothing', label: 'Off' },
     { id: 'suspend', label: 'Suspend' },
     { id: 'hibernate', label: 'Hibernate' },
 ];
 
-const IDLE_ACTION_OPTIONS = [
-    { id: 'unchanged', label: 'Leave Unchanged' },
+const IDLE_ACTION_LOW_BAT = [
+    { id: 'unchanged', label: 'Same as Battery' },
     { id: 'nothing', label: 'Off' },
     { id: 'suspend', label: 'Suspend' },
     { id: 'hibernate', label: 'Hibernate' },
 ];
 
 const IDLE_TIMEOUT_OPTIONS = [
-    { value: 300, label: '5 minutes' },
-    { value: 600, label: '10 minutes' },
-    { value: 900, label: '15 minutes' },
-    { value: 1200, label: '20 minutes' },
-    { value: 1800, label: '30 minutes' },
-    { value: 2700, label: '45 minutes' },
-    { value: 3600, label: '1 hour' },
-    { value: 7200, label: '2 hours' },
+    { value: 300, label: 'After 5 min' },
+    { value: 600, label: 'After 10 min' },
+    { value: 900, label: 'After 15 min' },
+    { value: 1200, label: 'After 20 min' },
+    { value: 1800, label: 'After 30 min' },
+    { value: 2700, label: 'After 45 min' },
+    { value: 3600, label: 'After 1 hour' },
+    { value: 7200, label: 'After 2 hours' },
 ];
 
 const SCREEN_BLANK_OPTIONS = [
@@ -101,10 +135,43 @@ const SLEEP_MODE_OPTIONS = [
     },
 ];
 
-const LOW_BATTERY_MODES = [
-    { id: 'upower', label: 'UPower Warning Level (Recommended)' },
-    { id: 'percentage', label: 'Custom Percentage' },
-];
+function createInfoButton(tooltipText, popoverText) {
+    const label = new Gtk.Label({
+        label: popoverText,
+        wrap: true,
+        max_width_chars: 40,
+        xalign: 0,
+        margin_top: 8,
+        margin_bottom: 8,
+        margin_start: 10,
+        margin_end: 10,
+    });
+
+    const popover = new Gtk.Popover({
+        child: label,
+    });
+
+    return new Gtk.MenuButton({
+        icon_name: 'info-outline-symbolic',
+        tooltip_text: tooltipText,
+        valign: Gtk.Align.CENTER,
+        css_classes: ['flat', 'circular'],
+        popover,
+    });
+}
+
+function findNearestTimeoutIndex(seconds) {
+    let bestIdx = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < IDLE_TIMEOUT_OPTIONS.length; i++) {
+        const diff = Math.abs(IDLE_TIMEOUT_OPTIONS[i].value - seconds);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            bestIdx = i;
+        }
+    }
+    return bestIdx;
+}
 
 export default class PowerStatesPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -137,6 +204,13 @@ class PrefsController {
         this._syncingUi = false;
         this._destroyed = false;
 
+        this._gnomePowerSettings = null;
+        try {
+            this._gnomePowerSettings = new Gio.Settings({ schema_id: GSD_POWER_SCHEMA });
+        } catch {
+            // Optional fallback if schema is unavailable
+        }
+
         this._capabilities = {
             lidIsPresent: true,
             onBattery: false,
@@ -150,8 +224,10 @@ class PrefsController {
 
         this._profileChoices = PROFILE_OPTIONS;
         this._lidChoices = LID_OPTIONS;
-        this._idleActionChoices = IDLE_ACTION_OPTIONS;
+        this._idleActionChoices = IDLE_ACTION_AC_BAT;
         this._sleepModeChoices = SLEEP_MODE_OPTIONS;
+
+        this._upowerPct = readUPowerPercentageLow();
 
         this._buildUi();
 
@@ -176,17 +252,23 @@ class PrefsController {
 
     _buildUi() {
         // =====================================================================
-        // Group 1: Automatic Behavior by Power State
+        // Group 1a: Header + Full-width Power State Switcher (never truncated)
         // =====================================================================
-        this._stateGroup = new Adw.PreferencesGroup({
+        this._switcherGroup = new Adw.PreferencesGroup({
             title: _('Automatic Behavior by Power State'),
             description: _(
-                'Applied on power transitions. Manual choices in Quick Settings remain respected until the next transition.'
+                'Applied on power transitions. Manual choices in Quick Settings stay active until the next transition.'
             ),
         });
 
         this._stateSwitcher = this._createStateSwitcher();
-        this._stateGroup.set_header_suffix(this._stateSwitcher.widget);
+        this._switcherGroup.add(this._stateSwitcher.widget);
+        this._page.add(this._switcherGroup);
+
+        // =====================================================================
+        // Group 1b: State-Scoped Policy Rows
+        // =====================================================================
+        this._stateGroup = new Adw.PreferencesGroup();
 
         // Conditional conflict banner (hidden when there are no warnings)
         this._conflictBanner = new Adw.Banner({
@@ -198,7 +280,7 @@ class PrefsController {
         // Power Mode
         this._profileRow = new Adw.ComboRow({
             title: _('Power Mode'),
-            subtitle: _('Default profile applied via power-profiles-daemon / tuned-ppd'),
+            subtitle: _('Default profile via power-profiles-daemon or tuned-ppd'),
         });
         this._setComboModel(this._profileRow, this._profileChoices.map(o => _(o.label)));
         this._profileRow.connect('notify::selected', () => {
@@ -213,7 +295,7 @@ class PrefsController {
         // When Laptop Lid Closes
         this._lidRow = new Adw.ComboRow({
             title: _('When Laptop Lid Closes'),
-            subtitle: _('Uses an unprivileged session inhibitor (no root required)'),
+            subtitle: _('Put the laptop to sleep when the lid closes'),
         });
         this._setComboModel(this._lidRow, this._lidChoices.map(o => _(o.label)));
         this._lidRow.connect('notify::selected', () => {
@@ -240,40 +322,63 @@ class PrefsController {
         });
         this._stateGroup.add(this._extMonRow);
 
-        // Automatic Suspend (Action)
-        this._idleActionRow = new Adw.ComboRow({
+        // Automatic Suspend (single row with Action + conditional Delay dropdowns)
+        this._idleRow = new Adw.ActionRow({
             title: _('Automatic Suspend'),
-            subtitle: _('Synced directly with GNOME Settings power-saving policy'),
+            subtitle: _('Synced with GNOME Settings power-saving policy'),
         });
-        this._setComboModel(this._idleActionRow, this._idleActionChoices.map(o => _(o.label)));
-        this._idleActionRow.connect('notify::selected', () => {
-            if (this._syncingUi)
-                return;
-            const choice = this._idleActionChoices[this._idleActionRow.selected];
-            if (choice)
-                this._settings.set_string(`${this._selectedState}-idle-action`, choice.id);
-        });
-        this._stateGroup.add(this._idleActionRow);
 
-        // Automatic Suspend Delay
-        this._idleTimeoutRow = new Adw.ComboRow({
-            title: _('Automatic Suspend Delay'),
-            subtitle: _('Inactivity time before automatic suspend triggers'),
+        const idleControlBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 6,
+            valign: Gtk.Align.CENTER,
         });
-        this._setComboModel(this._idleTimeoutRow, IDLE_TIMEOUT_OPTIONS.map(o => _(o.label)));
-        this._idleTimeoutRow.connect('notify::selected', () => {
+
+        this._idleActionDropDown = new Gtk.DropDown({
+            model: Gtk.StringList.new(this._idleActionChoices.map(o => _(o.label))),
+            valign: Gtk.Align.CENTER,
+        });
+        this._idleActionDropDown.connect('notify::selected', () => {
             if (this._syncingUi)
                 return;
-            const choice = IDLE_TIMEOUT_OPTIONS[this._idleTimeoutRow.selected];
-            if (choice)
-                this._settings.set_int(`${this._selectedState}-idle-timeout`, choice.value);
+            const choice = this._idleActionChoices[this._idleActionDropDown.selected];
+            if (!choice)
+                return;
+            this._settings.set_string(`${this._selectedState}-idle-action`, choice.id);
+            // Also persist the currently displayed delay when turning on suspend/hibernate
+            if (choice.id === 'suspend' || choice.id === 'hibernate') {
+                const delayOpt = IDLE_TIMEOUT_OPTIONS[this._idleTimeoutDropDown.selected];
+                if (delayOpt)
+                    this._settings.set_int(`${this._selectedState}-idle-timeout`, delayOpt.value);
+            }
         });
-        this._stateGroup.add(this._idleTimeoutRow);
+
+        this._idleTimeoutDropDown = new Gtk.DropDown({
+            model: Gtk.StringList.new(IDLE_TIMEOUT_OPTIONS.map(o => _(o.label))),
+            valign: Gtk.Align.CENTER,
+        });
+        this._idleTimeoutDropDown.connect('notify::selected', () => {
+            if (this._syncingUi)
+                return;
+            const opt = IDLE_TIMEOUT_OPTIONS[this._idleTimeoutDropDown.selected];
+            if (!opt)
+                return;
+            // Ensure action is persisted too if AC/Battery was still tracking native GNOME value
+            const currentActionChoice = this._idleActionChoices[this._idleActionDropDown.selected];
+            if (currentActionChoice && this._settings.get_string(`${this._selectedState}-idle-action`) === 'unchanged')
+                this._settings.set_string(`${this._selectedState}-idle-action`, currentActionChoice.id);
+            this._settings.set_int(`${this._selectedState}-idle-timeout`, opt.value);
+        });
+
+        idleControlBox.append(this._idleActionDropDown);
+        idleControlBox.append(this._idleTimeoutDropDown);
+        this._idleRow.add_suffix(idleControlBox);
+        this._stateGroup.add(this._idleRow);
 
         // Screen Blank Delay
         this._screenBlankRow = new Adw.ComboRow({
             title: _('Screen Blank Delay'),
-            subtitle: _('Syncs session idle-delay on transition; restored if extension is disabled'),
+            subtitle: _('Syncs session idle-delay on transition; restored if disabled'),
         });
         this._setComboModel(this._screenBlankRow, SCREEN_BLANK_OPTIONS.map(o => _(o.label)));
         this._screenBlankRow.connect('notify::selected', () => {
@@ -288,17 +393,18 @@ class PrefsController {
         this._page.add(this._stateGroup);
 
         // =====================================================================
-        // Group 2: Global Policies & Guardrails
+        // Group 2: Global Policies (Note: avoid bare '&' — AdwPreferencesGroup
+        // title parses Pango markup!)
         // =====================================================================
         this._globalGroup = new Adw.PreferencesGroup({
-            title: _('Global Policies & Guardrails'),
+            title: _('Global Policies'),
             description: _('Configured once across all power states.'),
         });
 
-        // When Sleeping, Enter (Sleep Mode)
+        // When Sleeping, Enter (always visible; explains if hibernate/hybrid are unavailable)
         this._sleepModeRow = new Adw.ComboRow({
             title: _('When Sleeping, Enter'),
-            subtitle: _('Choose how lid-triggered Suspend puts the laptop to sleep'),
+            subtitle: _('How Suspend actions put the laptop to sleep'),
         });
         this._setComboModel(this._sleepModeRow, this._sleepModeChoices.map(o => _(o.label)));
         this._sleepModeRow.connect('notify::selected', () => {
@@ -310,32 +416,41 @@ class PrefsController {
         });
         this._globalGroup.add(this._sleepModeRow);
 
-        // Low Battery Trigger (ExpanderRow)
-        const upowerPct = readUPowerPercentageLow();
-        const upowerLabel = upowerPct ? `${upowerPct}%` : _('system default');
-
-        this._lowBatteryExpander = new Adw.ExpanderRow({
+        // Low Battery Trigger: Default (X%) | Custom [+ inline %] + Info popover
+        this._lowBatteryRow = new Adw.ActionRow({
             title: _('Low Battery Trigger'),
-            subtitle: _('Currently uses UPower warning level (%s)').format(upowerLabel),
+            subtitle: _('When to enter the Low Battery power state'),
         });
 
-        this._lowBatteryModeRow = new Adw.ComboRow({
-            title: _('Detection Source'),
-            subtitle: _('UPower reads /etc/UPower/UPower.conf (%s)').format(upowerLabel),
+        const defaultLowLabel = this._upowerPct
+            ? _('Default (%d%%)').format(this._upowerPct)
+            : _('Default (System)');
+
+        const lowBatInfoBtn = createInfoButton(
+            _('About Low Battery Trigger'),
+            _(
+                'Default uses UPower’s system low-battery warning level (currently %s in /etc/UPower/UPower.conf), staying in sync with GNOME’s own low-battery alerts.\n\nCustom triggers the Low Battery policy as soon as your battery reaches the percentage you pick here.'
+            ).format(this._upowerPct ? `${this._upowerPct}%` : _('the system default'))
+        );
+
+        const lowBatBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 6,
+            valign: Gtk.Align.CENTER,
         });
-        this._setComboModel(this._lowBatteryModeRow, LOW_BATTERY_MODES.map(o => _(o.label)));
-        this._lowBatteryModeRow.connect('notify::selected', () => {
+
+        this._lowBatteryModeDropDown = new Gtk.DropDown({
+            model: Gtk.StringList.new([defaultLowLabel, _('Custom')]),
+            valign: Gtk.Align.CENTER,
+        });
+        this._lowBatteryModeDropDown.connect('notify::selected', () => {
             if (this._syncingUi)
                 return;
-            const choice = LOW_BATTERY_MODES[this._lowBatteryModeRow.selected];
-            if (choice)
-                this._settings.set_string('low-battery-mode', choice.id);
+            const mode = this._lowBatteryModeDropDown.selected === 1 ? 'percentage' : 'upower';
+            this._settings.set_string('low-battery-mode', mode);
         });
-        this._lowBatteryExpander.add_row(this._lowBatteryModeRow);
 
-        this._lowBatteryPctRow = new Adw.SpinRow({
-            title: _('Custom Low Battery Threshold (%)'),
-            subtitle: _('Activate Low Battery policy at or below this battery level'),
+        this._lowBatterySpin = new Gtk.SpinButton({
             adjustment: new Gtk.Adjustment({
                 lower: 5,
                 upper: 50,
@@ -343,21 +458,34 @@ class PrefsController {
                 page_increment: 10,
                 value: this._settings.get_int('low-battery-percentage'),
             }),
+            valign: Gtk.Align.CENTER,
+            width_chars: 3,
         });
         this._settings.bind(
             'low-battery-percentage',
-            this._lowBatteryPctRow,
+            this._lowBatterySpin,
             'value',
             Gio.SettingsBindFlags.DEFAULT
         );
-        this._lowBatteryExpander.add_row(this._lowBatteryPctRow);
-        this._globalGroup.add(this._lowBatteryExpander);
+
+        this._lowBatteryPctSuffix = new Gtk.Label({
+            label: '%',
+            css_classes: ['dim-label'],
+            valign: Gtk.Align.CENTER,
+        });
+
+        lowBatBox.append(lowBatInfoBtn);
+        lowBatBox.append(this._lowBatteryModeDropDown);
+        lowBatBox.append(this._lowBatterySpin);
+        lowBatBox.append(this._lowBatteryPctSuffix);
+        this._lowBatteryRow.add_suffix(lowBatBox);
+        this._globalGroup.add(this._lowBatteryRow);
 
         // Remember Manual Quick Settings Changes
         this._rememberRow = new Adw.SwitchRow({
             title: _('Remember Manual Quick Settings Changes'),
             subtitle: _(
-                'Off keeps Quick Settings changes temporary until the next power transition; On saves them as the new default'
+                'Off keeps Quick Settings changes temporary until the next transition; On saves them as the default'
             ),
         });
         this._settings.bind(
@@ -367,6 +495,90 @@ class PrefsController {
             Gio.SettingsBindFlags.DEFAULT
         );
         this._globalGroup.add(this._rememberRow);
+
+        // Advanced (collapsed by default)
+        this._advancedExpander = new Adw.ExpanderRow({
+            title: _('Advanced'),
+            subtitle: _('Unplug grace delay, transition notifications, and media playback'),
+            expanded: false,
+        });
+
+        // Unplug-While-Closed Grace Delay: Default (3s) | Custom [+ inline s] + Info popover
+        this._graceRow = new Adw.ActionRow({
+            title: _('Unplug-While-Closed Delay'),
+            subtitle: _('Wait briefly before applying battery lid action if unplugged while closed'),
+        });
+
+        const graceInfoBtn = createInfoButton(
+            _('About Unplug-While-Closed Delay'),
+            _(
+                'If you unplug AC while the laptop lid is already shut (for example, bumping a USB-C cable), Power States waits briefly before applying the Battery lid action.\n\nDefault waits %d seconds. Choose Custom to set 0–30 seconds.'
+            ).format(DEFAULT_UNPLUG_GRACE_SECONDS)
+        );
+
+        const graceBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 6,
+            valign: Gtk.Align.CENTER,
+        });
+
+        this._graceModeDropDown = new Gtk.DropDown({
+            model: Gtk.StringList.new([
+                _('Default (%ds)').format(DEFAULT_UNPLUG_GRACE_SECONDS),
+                _('Custom'),
+            ]),
+            valign: Gtk.Align.CENTER,
+        });
+        this._graceModeDropDown.connect('notify::selected', () => {
+            if (this._syncingUi)
+                return;
+            const mode = this._graceModeDropDown.selected === 1 ? 'custom' : 'default';
+            this._settings.set_string('unplug-while-closed-mode', mode);
+        });
+
+        this._graceSpin = new Gtk.SpinButton({
+            adjustment: new Gtk.Adjustment({
+                lower: 0,
+                upper: 30,
+                step_increment: 1,
+                page_increment: 5,
+                value: this._settings.get_int('unplug-while-closed-grace-seconds'),
+            }),
+            valign: Gtk.Align.CENTER,
+            width_chars: 3,
+        });
+        this._settings.bind(
+            'unplug-while-closed-grace-seconds',
+            this._graceSpin,
+            'value',
+            Gio.SettingsBindFlags.DEFAULT
+        );
+
+        this._graceSecSuffix = new Gtk.Label({
+            label: 's',
+            css_classes: ['dim-label'],
+            valign: Gtk.Align.CENTER,
+        });
+
+        graceBox.append(graceInfoBtn);
+        graceBox.append(this._graceModeDropDown);
+        graceBox.append(this._graceSpin);
+        graceBox.append(this._graceSecSuffix);
+        this._graceRow.add_suffix(graceBox);
+        this._advancedExpander.add_row(this._graceRow);
+
+        // Show Transition Notifications
+        this._notifyRow = new Adw.SwitchRow({
+            title: _('Show Transition Notifications'),
+            subtitle: _('Notify when Power States automatically switches Power Mode'),
+        });
+        this._settings.bind(
+            'notifications',
+            this._notifyRow,
+            'active',
+            Gio.SettingsBindFlags.DEFAULT
+        );
+        this._advancedExpander.add_row(this._notifyRow);
 
         // Pause Media Players on Suspend
         this._pauseMediaRow = new Adw.SwitchRow({
@@ -379,61 +591,29 @@ class PrefsController {
             'active',
             Gio.SettingsBindFlags.DEFAULT
         );
-        this._globalGroup.add(this._pauseMediaRow);
+        this._advancedExpander.add_row(this._pauseMediaRow);
 
-        // Unplug-While-Closed Grace Delay
-        this._graceRow = new Adw.SpinRow({
-            title: _('Unplug-While-Closed Grace Delay (Seconds)'),
-            subtitle: _('Wait briefly before applying the battery lid action if unplugged while closed'),
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 30,
-                step_increment: 1,
-                page_increment: 5,
-                value: this._settings.get_int('unplug-while-closed-grace-seconds'),
-            }),
-        });
-        this._settings.bind(
-            'unplug-while-closed-grace-seconds',
-            this._graceRow,
-            'value',
-            Gio.SettingsBindFlags.DEFAULT
-        );
-        this._globalGroup.add(this._graceRow);
-
-        // Notifications
-        this._notifyRow = new Adw.SwitchRow({
-            title: _('Show Transition Notifications'),
-            subtitle: _('Notify when Power States automatically changes Power Mode'),
-        });
-        this._settings.bind(
-            'notifications',
-            this._notifyRow,
-            'active',
-            Gio.SettingsBindFlags.DEFAULT
-        );
-        this._globalGroup.add(this._notifyRow);
-
+        this._globalGroup.add(this._advancedExpander);
         this._page.add(this._globalGroup);
 
         this._refreshAll();
     }
 
     /**
-     * Build the scoped [ Plugged In | On Battery | Low Battery ] selector.
-     * Uses native Adw.ToggleGroup on Libadwaita 1.7+ (GNOME 48–51) and falls back
-     * gracefully to a linked Gtk.ToggleButton group on GNOME 45–47.
+     * Build a full-width [ Plugged In | On Battery | Low Battery ] selector
+     * placed cleanly below the group heading so labels never clip.
      */
     _createStateSwitcher() {
         if (typeof Adw.ToggleGroup === 'function' && typeof Adw.Toggle === 'function') {
             const group = new Adw.ToggleGroup({
-                valign: Gtk.Align.CENTER,
-                homogeneous: false,
+                hexpand: true,
+                homogeneous: true,
             });
             for (const tab of STATE_TABS) {
                 group.add(new Adw.Toggle({
                     name: tab.id,
                     label: _(tab.label),
+                    icon_name: tab.icon,
                 }));
             }
             group.active_name = this._selectedState;
@@ -453,7 +633,8 @@ class PrefsController {
 
         const box = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
-            valign: Gtk.Align.CENTER,
+            hexpand: true,
+            homogeneous: true,
             css_classes: ['linked'],
         });
         const buttons = new Map();
@@ -511,32 +692,63 @@ class PrefsController {
             this._extMonRow.visible = this._capabilities.lidIsPresent;
             this._graceRow.visible = this._capabilities.lidIsPresent;
 
-            // Filter Hibernate when unsupported unless currently saved
+            // Filter Hibernate when unsupported
             const canHibernate = this._capabilities.canHibernate;
             this._lidChoices = LID_OPTIONS.filter(o => o.id !== 'hibernate' || canHibernate);
             this._setComboModel(this._lidRow, this._lidChoices.map(o => _(o.label)));
 
-            this._idleActionChoices = IDLE_ACTION_OPTIONS.filter(
-                o => o.id !== 'hibernate' || canHibernate
-            );
-            this._setComboModel(this._idleActionRow, this._idleActionChoices.map(o => _(o.label)));
-
-            // Only show "When Sleeping, Enter" if hardware supports >1 sleep mode
-            this._sleepModeChoices = SLEEP_MODE_OPTIONS.filter(
+            // Always show "When Sleeping, Enter" — explain transparently if only Standby is supported
+            const supportedModes = SLEEP_MODE_OPTIONS.filter(
                 o => this._capabilities[o.capability]
             );
+            this._sleepModeChoices =
+                supportedModes.length > 0 ? supportedModes : [SLEEP_MODE_OPTIONS[0]];
+            this._setComboModel(
+                this._sleepModeRow,
+                this._sleepModeChoices.map(o => _(o.label))
+            );
+            this._sleepModeRow.visible = true;
             if (this._sleepModeChoices.length <= 1) {
-                this._sleepModeRow.visible = false;
-            } else {
-                this._sleepModeRow.visible = true;
-                this._setComboModel(
-                    this._sleepModeRow,
-                    this._sleepModeChoices.map(o => _(o.label))
+                this._sleepModeRow.sensitive = false;
+                this._sleepModeRow.subtitle = _(
+                    'Hibernate and Hybrid Sleep are not configured on this system'
                 );
+            } else {
+                this._sleepModeRow.sensitive = true;
+                this._sleepModeRow.subtitle = _('How Suspend actions put the laptop to sleep');
             }
         } finally {
             this._syncingUi = false;
         }
+    }
+
+    _getEffectiveIdleValues(stateKey, cfg) {
+        let action = cfg.idleAction;
+        let timeout = cfg.idleTimeout;
+
+        // For AC and Battery, if Power States hasn't overridden yet ('unchanged'),
+        // display GNOME Settings' current live value directly so there is no
+        // confusing "Leave Unchanged" label.
+        if ((stateKey === 'ac' || stateKey === 'battery') && action === 'unchanged') {
+            if (this._gnomePowerSettings) {
+                const typeKey =
+                    stateKey === 'ac' ? 'sleep-inactive-ac-type' : 'sleep-inactive-battery-type';
+                const timeoutKey =
+                    stateKey === 'ac'
+                        ? 'sleep-inactive-ac-timeout'
+                        : 'sleep-inactive-battery-timeout';
+                const nativeType = this._gnomePowerSettings.get_string(typeKey);
+                const nativeTimeout = this._gnomePowerSettings.get_int(timeoutKey);
+                action =
+                    nativeType === 'suspend' || nativeType === 'hibernate' ? nativeType : 'nothing';
+                if (nativeTimeout >= 60)
+                    timeout = nativeTimeout;
+            } else {
+                action = 'nothing';
+            }
+        }
+
+        return { action, timeout };
     }
 
     _refreshAll() {
@@ -552,21 +764,59 @@ class PrefsController {
             const globalCfg = readGlobalConfig(this._settings);
 
             this._selectComboById(this._profileRow, this._profileChoices, cfg.powerProfile);
-            this._selectComboById(this._lidRow, this._lidChoices, cfg.lidAction);
 
-            const extMonSensitive = cfg.lidAction !== 'system' && cfg.lidAction !== 'nothing';
+            // Lid action + dynamic explanatory subtitle
+            this._selectComboById(this._lidRow, this._lidChoices, cfg.lidAction);
+            const activeLidOpt =
+                this._lidChoices.find(c => c.id === cfg.lidAction) ?? this._lidChoices[0];
+            if (activeLidOpt)
+                this._lidRow.subtitle = _(activeLidOpt.subtitle);
+
+            const extMonSensitive = cfg.lidAction !== 'nothing';
             this._extMonRow.sensitive = extMonSensitive;
             this._extMonRow.active = cfg.lidIgnoreExternalMonitor;
 
-            this._selectComboById(this._idleActionRow, this._idleActionChoices, cfg.idleAction);
-            this._selectComboByValue(this._idleTimeoutRow, IDLE_TIMEOUT_OPTIONS, cfg.idleTimeout);
-            this._idleTimeoutRow.sensitive =
-                cfg.idleAction === 'suspend' || cfg.idleAction === 'hibernate';
+            // Automatic Suspend (single row with Action + conditional Delay)
+            const canHibernate = this._capabilities.canHibernate;
+            const baseIdleChoices =
+                stateKey === 'low-battery' ? IDLE_ACTION_LOW_BAT : IDLE_ACTION_AC_BAT;
+            this._idleActionChoices = baseIdleChoices.filter(
+                o => o.id !== 'hibernate' || canHibernate
+            );
+            this._idleActionDropDown.model = Gtk.StringList.new(
+                this._idleActionChoices.map(o => _(o.label))
+            );
+
+            const effectiveIdle = this._getEffectiveIdleValues(stateKey, cfg);
+            const idleActionIdx = this._idleActionChoices.findIndex(
+                c => c.id === effectiveIdle.action
+            );
+            this._idleActionDropDown.selected = idleActionIdx >= 0 ? idleActionIdx : 0;
+
+            const showDelay =
+                effectiveIdle.action === 'suspend' || effectiveIdle.action === 'hibernate';
+            this._idleTimeoutDropDown.visible = showDelay;
+            this._idleTimeoutDropDown.selected = findNearestTimeoutIndex(effectiveIdle.timeout);
+
+            this._idleRow.subtitle =
+                stateKey === 'low-battery'
+                    ? _('Temporarily overrides Battery suspend while on low battery')
+                    : _('Synced with GNOME Settings power-saving policy');
 
             this._selectComboByValue(this._screenBlankRow, SCREEN_BLANK_OPTIONS, cfg.screenBlank);
 
             // Contextual conflict guardrail banner
-            const warnings = detectPolicyConflicts(stateKey, cfg, globalCfg, this._capabilities);
+            const conflictCfg = {
+                ...cfg,
+                idleAction: effectiveIdle.action,
+                idleTimeout: effectiveIdle.timeout,
+            };
+            const warnings = detectPolicyConflicts(
+                stateKey,
+                conflictCfg,
+                globalCfg,
+                this._capabilities
+            );
             if (warnings.length > 0) {
                 this._conflictBanner.title = warnings[0].message;
                 this._conflictBanner.revealed = true;
@@ -582,33 +832,20 @@ class PrefsController {
         this._syncingUi = true;
         try {
             const globalCfg = readGlobalConfig(this._settings);
-            if (this._sleepModeChoices.length > 1) {
-                this._selectComboById(
-                    this._sleepModeRow,
-                    this._sleepModeChoices,
-                    globalCfg.sleepMode
-                );
-            }
 
-            this._selectComboById(
-                this._lowBatteryModeRow,
-                LOW_BATTERY_MODES,
-                globalCfg.lowBatteryMode
-            );
-            const isCustomPct = globalCfg.lowBatteryMode === 'percentage';
-            this._lowBatteryPctRow.sensitive = isCustomPct;
-            this._lowBatteryPctRow.visible = isCustomPct;
+            this._selectComboById(this._sleepModeRow, this._sleepModeChoices, globalCfg.sleepMode);
 
-            if (isCustomPct) {
-                this._lowBatteryExpander.subtitle = _(
-                    'Triggers at or below %d%% battery'
-                ).format(globalCfg.lowBatteryPercentage);
-            } else {
-                const upowerPct = readUPowerPercentageLow();
-                this._lowBatteryExpander.subtitle = upowerPct
-                    ? _('Uses UPower warning level (%d%% in /etc/UPower/UPower.conf)').format(upowerPct)
-                    : _('Uses UPower system warning level');
-            }
+            // Low Battery Trigger
+            const isCustomLow = globalCfg.lowBatteryMode === 'percentage';
+            this._lowBatteryModeDropDown.selected = isCustomLow ? 1 : 0;
+            this._lowBatterySpin.visible = isCustomLow;
+            this._lowBatteryPctSuffix.visible = isCustomLow;
+
+            // Unplug-While-Closed Grace Delay
+            const isCustomGrace = globalCfg.unplugWhileClosedMode === 'custom';
+            this._graceModeDropDown.selected = isCustomGrace ? 1 : 0;
+            this._graceSpin.visible = isCustomGrace;
+            this._graceSecSuffix.visible = isCustomGrace;
         } finally {
             this._syncingUi = false;
         }
@@ -634,5 +871,6 @@ class PrefsController {
             this._settings.disconnect(this._settingsChangedId);
             this._settingsChangedId = null;
         }
+        this._gnomePowerSettings = null;
     }
 }

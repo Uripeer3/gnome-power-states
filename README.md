@@ -20,16 +20,16 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 
 ### Per-State Policies (`Plugged In` | `On Battery` | `Low Battery`)
 - **Power Mode**: Automatically switch between *Performance*, *Balanced*, *Power Saver*, or *Leave Unchanged* via `power-profiles-daemon` or `tuned-ppd`.
-- **When Laptop Lid Closes (Zero Root)**: Choose *System Default*, *Do Nothing*, *Lock Screen*, *Turn Off Screen*, *Suspend*, or *Hibernate* independently per power state using an unprivileged `systemd-logind` `handle-lid-switch` session inhibitor.
+- **When Laptop Lid Closes (Zero Root)**: Choose *Suspend*, *Do Nothing*, *Lock Screen*, *Turn Off Screen*, or *Hibernate* independently per power state using an unprivileged `systemd-logind` `handle-lid-switch` session inhibitor.
 - **Clamshell / External Monitor Awareness**: Each state includes an *"Even When an External Monitor Is Connected"* toggle (off by default, so closing the lid while docked stays awake unless you explicitly opt in).
-- **Automatic Suspend (Synced with GNOME Settings)**: Directly synchronizes AC and Battery inactivity settings with GNOME's native `org.gnome.settings-daemon.plugins.power` keys (`sleep-inactive-ac-*` and `sleep-inactive-battery-*`), plus a temporary override while in *Low Battery* that restores cleanly on exit.
+- **Automatic Suspend (Synced with GNOME Settings)**: Single compact row (`Action` + `Delay`) synced directly with GNOME's native `org.gnome.settings-daemon.plugins.power` keys (`sleep-inactive-ac-*` and `sleep-inactive-battery-*`), plus an optional temporary override while in *Low Battery* that restores cleanly on exit.
 - **Screen Blank Delay**: Per-state `org.gnome.desktop.session` `idle-delay` (optional; defaults to *Leave Unchanged* and restores your original baseline if the extension is disabled).
 
-### Global Policies & Guardrails
-- **Separated Sleep Mode**: Configure *"When Sleeping, Enter"* (*Standby*, *Suspend, then Hibernate*, or *Hybrid Sleep*) once globally — automatically hidden if your hardware only supports one sleep mode.
-- **Low Battery Trigger**: Uses UPower's native `WarningLevel` by default (displaying your `/etc/UPower/UPower.conf` `PercentageLow` threshold), or an optional custom battery percentage.
-- **Unplug-While-Closed Grace Delay**: If AC is disconnected while the laptop lid is already closed (e.g., an accidental cable bump), waits a configurable grace period (default `3s`) before applying the Battery lid action.
-- **Pause Media Players on Suspend**: Automatically sends MPRIS `Pause` to active players before lid-triggered suspend or hibernate.
+### Global Policies & Advanced
+- **Separated Sleep Mode**: *"When Sleeping, Enter"* (*Standby*, *Suspend, then Hibernate*, or *Hybrid Sleep*) is configured once globally and transparently indicates when Hibernate / Hybrid Sleep are not configured on the system.
+- **Low Battery Trigger**: Simple *Default (X%)* (using UPower's system threshold) or *Custom* percentage, with an inline info popover explaining the difference.
+- **Remember Manual Quick Settings Changes**: Off by default so manual overrides stay temporary until the next power transition.
+- **Advanced (collapsed by default)**: *Unplug-While-Closed Delay* (*Default (3s)* or *Custom* with info popover), *Show Transition Notifications*, and *Pause Media Players on Suspend*.
 - **Contextual Conflict Guardrails**: Surfaces an inline `Adw.Banner` in Preferences only when settings conflict (e.g., Screen Blank set at or after Automatic Suspend, or Battery Lid set to *Do Nothing*).
 - **Reliable AC Detection**: Subscribes to **all** UPower `LINE_POWER` devices (plus hotplug events) alongside `DisplayDevice`, avoiding missed AC reconnects on laptops with battery charge thresholds or multiple USB-C PD ports.
 
