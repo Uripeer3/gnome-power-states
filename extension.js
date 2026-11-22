@@ -65,15 +65,32 @@ export default class PowerStatesExtension extends Extension {
             onExternalMonitorChanged: (wasConnected, isConnected) =>
                 this._onExternalMonitorChanged(wasConnected, isConnected),
             onSessionActiveChanged: isActive => this._onSessionActiveChanged(isActive),
+            onLoginOwnerChanged: isConnected => {
+                if (this._destroyed || !this._initialized || !this._upowerWatcher)
+                    return;
+                if (isConnected)
+                    this._reconcile(this._upowerWatcher.getReading());
+            },
             shouldPauseMediaOnSleep: () =>
                 Boolean(this._settings?.get_boolean('pause-media-on-suspend')),
             onError: msg => this._notify(msg, true),
         });
 
-        // Feed UPower.LidIsClosed into LidController for systemd <= 255 compatibility
+        // Feed UPower.LidIsClosed into LidController (systemd <= 255 compatibility)
+        // AND release lid inhibitor immediately if UPower disappears from the bus.
         this._upowerWatcher = new UPowerWatcher(
-            reading => this._reconcile(reading, { forceProfile: false }),
-            isClosed => this._lidController?.notifyLidClosed(isClosed)
+            reading => this._reconcile(reading),
+            isClosed => this._lidController?.notifyLidClosed(isClosed),
+            isConnected => {
+                if (this._destroyed || !this._initialized)
+                    return;
+                if (!isConnected) {
+                    this._lidController?.setInhibitDesired(false);
+                } else {
+                    this._lidController?.resetInhibitorFailure();
+                    this._reconcile(this._upowerWatcher.getReading());
+                }
+            }
         );
 
         this._profileController = new ProfileController({
@@ -90,6 +107,7 @@ export default class PowerStatesExtension extends Extension {
                 if (this._initialized && this._upowerWatcher) {
                     this._reconcile(this._upowerWatcher.getReading(), {
                         forceProfile: !this._manualOverrideActive,
+                        userEditedProfile: false,
                     });
                 }
             },
@@ -104,8 +122,6 @@ export default class PowerStatesExtension extends Extension {
     }
 
     async _initAsync(generation) {
-        // Initialize services independently so one transient/optional backend failure
-        // never disables the rest of the extension for the session.
         const [capRes] = await Promise.allSettled([
             probeSystemCapabilities(),
             this._upowerWatcher.initialize(),
@@ -120,10 +136,12 @@ export default class PowerStatesExtension extends Extension {
             this._capabilities = capRes.value;
 
         this._initialized = true;
+        // On initial startup: respect external application holds AND respect any
+        // intervening native GSettings edits made while Shell was down.
         this._reconcile(this._upowerWatcher.getReading(), {
             forceProfile: true,
-            forceLowBattery: true,
-            forceIdleDelay: true,
+            userEditedProfile: false,
+            isInitialStartup: true,
         });
     }
 
@@ -164,16 +182,10 @@ export default class PowerStatesExtension extends Extension {
         return configs;
     }
 
-    /**
-     * Route GSettings updates by key so unrelated preference edits (or internal
-     * recovery-* journal writes) NEVER undo a manual Quick Settings Power Mode
-     * choice or overwrite unrelated GNOME Settings keys.
-     */
     _onSettingsChanged(key) {
         if (this._destroyed || !this._initialized || !this._upowerWatcher || !this._settings)
             return;
 
-        // Ignore our own internal crash-recovery journal keys
         if (key.startsWith('recovery-'))
             return;
 
@@ -189,6 +201,12 @@ export default class PowerStatesExtension extends Extension {
             );
         }
 
+        // Changing lid or sleep policy cancels any pending grace action and resets retry block
+        if (key.includes('-lid-') || key === 'sleep-mode' || key.startsWith('unplug-while-closed-')) {
+            this._lidController?.cancelGraceTimer();
+            this._lidController?.resetInhibitorFailure();
+        }
+
         const activeState = this._lastPolicyState;
         const editedActiveProfile =
             activeState !== null && key === `${activeState}-power-profile`;
@@ -202,6 +220,7 @@ export default class PowerStatesExtension extends Extension {
 
         this._reconcile(this._upowerWatcher.getReading(), {
             forceProfile: editedActiveProfile,
+            userEditedProfile: editedActiveProfile,
             forceLowBattery: editedLowBatteryIdle,
             forceIdleDelay: editedActiveScreenBlank,
         });
@@ -211,7 +230,6 @@ export default class PowerStatesExtension extends Extension {
         if (this._destroyed || !this._settings || !this._lastPolicyState)
             return;
 
-        // Always respect the user's manual Quick Settings selection while in this state.
         this._manualOverrideActive = true;
     }
 
@@ -219,21 +237,30 @@ export default class PowerStatesExtension extends Extension {
         if (this._destroyed || !this._initialized || this._manualOverrideActive || !this._upowerWatcher)
             return;
 
-        if (this._lastPolicyState === 'ac')
-            this._reconcile(this._upowerWatcher.getReading(), { forceProfile: true });
+        if (this._lastPolicyState === 'ac') {
+            this._reconcile(this._upowerWatcher.getReading(), {
+                forceProfile: true,
+                userEditedProfile: false,
+            });
+        }
     }
 
     _onSessionActiveChanged(isActive) {
         if (this._destroyed || !this._initialized || !this._upowerWatcher)
             return;
 
-        if (isActive)
-            this._reconcile(this._upowerWatcher.getReading(), { forceProfile: false });
+        if (isActive) {
+            this._lidController?.resetInhibitorFailure();
+            this._reconcile(this._upowerWatcher.getReading());
+        }
     }
 
     /**
-     * Handle undocking a closed laptop when the external monitor disconnects AFTER
-     * AC power dropped (two events from unplugging a single USB-C dock cable).
+     * Handle external monitor topology changes:
+     * - Always reconcile inhibitor ownership cleanly
+     * - If undocking a closed laptop (external display disconnects AFTER AC dropped),
+     *   schedule the closed-lid grace action
+     * - If redocking an external display, cancel any pending undock/unplug grace timer
      */
     _onExternalMonitorChanged(wasConnected, isConnected) {
         if (
@@ -245,6 +272,9 @@ export default class PowerStatesExtension extends Extension {
         ) {
             return;
         }
+
+        // Reconcile inhibitor ownership for the new display topology
+        this._reconcile(this._upowerWatcher.getReading());
 
         if (wasConnected && !isConnected && this._lidController.lidClosed) {
             const reading = this._upowerWatcher.getReading();
@@ -267,14 +297,19 @@ export default class PowerStatesExtension extends Extension {
                 );
             }
         } else if (!wasConnected && isConnected) {
-            // Re-attached external monitor — cancel any pending undock/unplug grace sleep
             this._lidController.cancelGraceTimer();
         }
     }
 
     _reconcile(
         reading,
-        { forceProfile = false, forceLowBattery = false, forceIdleDelay = false } = {}
+        {
+            forceProfile = false,
+            userEditedProfile = false,
+            isInitialStartup = false,
+            forceLowBattery = false,
+            forceIdleDelay = false,
+        } = {}
     ) {
         if (this._destroyed || !this._initialized || !this._settings)
             return;
@@ -284,16 +319,19 @@ export default class PowerStatesExtension extends Extension {
         const nextState = resolvePowerState(reading, globalConfig);
         const previousState = this._lastPolicyState;
         const stateChanged = previousState !== null && previousState !== nextState;
-        const isFirstReconcile = previousState === null;
 
-        if (stateChanged)
+        if (stateChanged) {
             this._manualOverrideActive = false;
+            this._lidController?.resetInhibitorFailure();
+        }
 
         const activeStateConfig = stateConfigs[nextState];
 
-        // 1. Power Profile (respecting manual Quick Settings overrides & active external app holds)
+        // 1. Power Profile (respecting manual Quick Settings overrides & external app holds
+        //    even on startup/backend-ready; only explicit user edits in prefs override an app hold)
         if (this._profileController?.isAvailable) {
-            const appHoldActive = !forceProfile && this._profileController.hasExternalApplicationHold();
+            const appHoldActive =
+                !userEditedProfile && this._profileController.hasExternalApplicationHold();
             if (!appHoldActive) {
                 const decision = resolveProfileTransition({
                     powerState: nextState,
@@ -313,22 +351,23 @@ export default class PowerStatesExtension extends Extension {
             }
         }
 
-        // 2. Runtime Idle Override (Low Battery) & Screen Blank — only on state change or explicit edit
+        // 2. Runtime Idle Override (Low Battery) & Screen Blank
         this._idleController?.applyForState(nextState, stateConfigs, {
-            stateChanged: stateChanged || isFirstReconcile,
+            stateChanged,
+            isInitialStartup,
             forceLowBattery,
             forceIdleDelay,
         });
 
         // 3. Lid-Close Inhibitor, Sleep Delay Inhibitor & Closed-Lid Transition Handling
         if (this._lidController) {
-            // Bounded sleep delay FD for reliable before-sleep MPRIS pausing
             this._lidController.setSleepDelayDesired(globalConfig.pauseMediaOnSuspend);
 
-            const hasLidEventSource =
-                Boolean(this._upowerWatcher?.isConnected) || this._lidController.isLoginConnected;
+            // Require UPower to be live for lid inhibition because UPower reliably
+            // emits LidIsClosed on BOTH systemd <= 255 and systemd 256+.
+            const hasReliableLidEvents = Boolean(this._upowerWatcher?.isConnected);
 
-            if (!this._capabilities.lidIsPresent || !hasLidEventSource) {
+            if (!this._capabilities.lidIsPresent || !hasReliableLidEvents) {
                 this._lidController.setInhibitDesired(false);
             } else {
                 const lidDecision = resolveLidDecision({
@@ -381,8 +420,6 @@ export default class PowerStatesExtension extends Extension {
         const globalConfig = readGlobalConfig(this._settings);
         const currentState = resolvePowerState(reading, globalConfig);
 
-        // If this came from a grace timer (unplug or undock), verify we are STILL in
-        // the originating state so reconnecting AC never triggers a stale action.
         if (expectedState !== null && currentState !== expectedState)
             return;
 

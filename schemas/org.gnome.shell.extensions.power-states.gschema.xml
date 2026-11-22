@@ -249,9 +249,14 @@
       <summary>Internal: last idle-delay value written by extension (for ownership check)</summary>
     </key>
 
-    <key name="recovery-low-bat-active" type="b">
+    <key name="recovery-low-bat-type-active" type="b">
       <default>false</default>
-      <summary>Internal: whether Power States holds a temporary Low Battery idle-suspend override</summary>
+      <summary>Internal: whether Power States owns a temporary Low Battery sleep-inactive-battery-type override</summary>
+    </key>
+
+    <key name="recovery-low-bat-timeout-active" type="b">
+      <default>false</default>
+      <summary>Internal: whether Power States owns a temporary Low Battery sleep-inactive-battery-timeout override</summary>
     </key>
 
     <key name="recovery-low-bat-baseline-type" type="s">

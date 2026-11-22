@@ -16,15 +16,19 @@ test: compile-schemas check-syntax
 	gjs -m tests/idleController.test.js
 
 check-syntax:
-	@for f in extension.js prefs.js lib/*.js tests/*.js; do \
+	@for f in lib/*.js; do \
+		out="$$(gjs -m "$$f" 2>&1)" || { echo "LOAD/SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; }; \
+	done
+	@for f in extension.js prefs.js; do \
 		out="$$(gjs -m "$$f" 2>&1 || true)"; \
 		if printf '%s\n' "$$out" | grep -qi "SyntaxError"; then \
-			echo "SYNTAX ERROR in $$f:"; \
-			printf '%s\n' "$$out"; \
-			exit 1; \
+			echo "SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
+		fi; \
+		if printf '%s\n' "$$out" | grep -qi "ImportError" && ! printf '%s\n' "$$out" | grep -q "resource:///org/gnome/"; then \
+			echo "LOCAL IMPORT ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
 		fi; \
 	done
-	@echo "All JS modules parsed cleanly (no SyntaxError)"
+	@echo "All JS modules parsed and resolved local imports cleanly"
 	glib-compile-schemas --strict --dry-run $(SCHEMA_DIR)
 
 install: compile-schemas

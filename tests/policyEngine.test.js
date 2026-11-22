@@ -168,10 +168,10 @@ test('resolveLidDecision: hibernate falls back to suspend when unsupported', () 
     assertEqual(d.actionOnClose, 'suspend', 'falls back cleanly');
 });
 
-test('resolveLidDecision: returns sleep-unsupported and no inhibitor when neither suspend nor hibernate works', () => {
+test('resolveLidDecision: returns sleep-unsupported and no inhibitor even when external monitor is connected', () => {
     const d = resolveLidDecision({
         stateConfig: { lidAction: 'suspend', lidIgnoreExternalMonitor: false },
-        externalMonitorConnected: false,
+        externalMonitorConnected: true,
         sleepMode: 'suspend',
         capabilities: {
             canSuspend: false,
@@ -182,7 +182,7 @@ test('resolveLidDecision: returns sleep-unsupported and no inhibitor when neithe
     });
     assertEqual(d.needsInhibitor, false, 'does not acquire inhibitor when sleep unavailable');
     assertEqual(d.actionOnClose, 'nothing', 'does not fabricate suspend action');
-    assertEqual(d.reason, 'sleep-unsupported', 'reports sleep-unsupported');
+    assertEqual(d.reason, 'sleep-unsupported', 'reports sleep-unsupported ahead of clamshell');
 });
 
 // 4. Unplug-while-closed escalation
