@@ -10,15 +10,21 @@ all: compile-schemas test
 compile-schemas:
 	glib-compile-schemas --strict $(SCHEMA_DIR)
 
-test: compile-schemas
+test: compile-schemas check-syntax
 	gjs -m tests/policyEngine.test.js
 	gjs -m tests/lidController.test.js
+	gjs -m tests/idleController.test.js
 
 check-syntax:
 	@for f in extension.js prefs.js lib/*.js tests/*.js; do \
-		echo "Checking syntax: $$f"; \
-		gjs --version >/dev/null; \
+		out="$$(gjs -m "$$f" 2>&1 || true)"; \
+		if printf '%s\n' "$$out" | grep -qi "SyntaxError"; then \
+			echo "SYNTAX ERROR in $$f:"; \
+			printf '%s\n' "$$out"; \
+			exit 1; \
+		fi; \
 	done
+	@echo "All JS modules parsed cleanly (no SyntaxError)"
 	glib-compile-schemas --strict --dry-run $(SCHEMA_DIR)
 
 install: compile-schemas

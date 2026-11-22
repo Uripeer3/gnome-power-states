@@ -281,8 +281,8 @@ class PrefsController {
 
         this._buildUi();
 
-        this._settingsChangedId = this._settings.connect('changed', () => {
-            if (!this._syncingUi)
+        this._settingsChangedId = this._settings.connect('changed', (_s, key) => {
+            if (!this._syncingUi && !key.startsWith('recovery-'))
                 this._scheduleRefresh();
         });
     }
@@ -729,24 +729,42 @@ class PrefsController {
         this._syncingUi = true;
         try {
             if (stateKey === 'ac' || stateKey === 'battery') {
-                if (this._gnomePowerSettings) {
-                    const typeKey =
-                        stateKey === 'ac' ? 'sleep-inactive-ac-type' : 'sleep-inactive-battery-type';
-                    const timeoutKey =
-                        stateKey === 'ac'
-                            ? 'sleep-inactive-ac-timeout'
-                            : 'sleep-inactive-battery-timeout';
+                const lowBatActive =
+                    stateKey === 'battery' &&
+                    this._settings.get_boolean('recovery-low-bat-active');
 
-                    if (this._gnomePowerSettings.is_writable(typeKey))
-                        this._gnomePowerSettings.set_string(typeKey, actionId);
-                    if (delayActive && this._gnomePowerSettings.is_writable(timeoutKey))
-                        this._gnomePowerSettings.set_int(timeoutKey, timeoutValue);
-                }
-
-                if (actionId === 'nothing' || actionId === 'suspend' || actionId === 'hibernate') {
-                    this._settings.set_string(`${stateKey}-idle-action`, actionId);
+                // If Low Battery is temporarily overriding sleep-inactive-battery-*,
+                // update the normal Battery extension keys + recovery baseline without
+                // clobbering the active Low Battery override.
+                if (lowBatActive) {
+                    if (actionId === 'nothing' || actionId === 'suspend' || actionId === 'hibernate') {
+                        this._settings.set_string('battery-idle-action', actionId);
+                        if (delayActive)
+                            this._settings.set_int('battery-idle-timeout', timeoutValue);
+                    }
+                    this._settings.set_string('recovery-low-bat-baseline-type', actionId);
                     if (delayActive)
-                        this._settings.set_int(`${stateKey}-idle-timeout`, timeoutValue);
+                        this._settings.set_int('recovery-low-bat-baseline-timeout', timeoutValue);
+                } else {
+                    if (this._gnomePowerSettings) {
+                        const typeKey =
+                            stateKey === 'ac' ? 'sleep-inactive-ac-type' : 'sleep-inactive-battery-type';
+                        const timeoutKey =
+                            stateKey === 'ac'
+                                ? 'sleep-inactive-ac-timeout'
+                                : 'sleep-inactive-battery-timeout';
+
+                        if (this._gnomePowerSettings.is_writable(typeKey))
+                            this._gnomePowerSettings.set_string(typeKey, actionId);
+                        if (delayActive && this._gnomePowerSettings.is_writable(timeoutKey))
+                            this._gnomePowerSettings.set_int(timeoutKey, timeoutValue);
+                    }
+
+                    if (actionId === 'nothing' || actionId === 'suspend' || actionId === 'hibernate') {
+                        this._settings.set_string(`${stateKey}-idle-action`, actionId);
+                        if (delayActive)
+                            this._settings.set_int(`${stateKey}-idle-timeout`, timeoutValue);
+                    }
                 }
             } else {
                 this._settings.set_string('low-battery-idle-action', actionId);
@@ -911,6 +929,20 @@ class PrefsController {
 
     _readExactIdleState(stateKey, cfg) {
         if (stateKey === 'ac' || stateKey === 'battery') {
+            // While Low Battery temporarily overrides sleep-inactive-battery-*,
+            // display the real saved normal Battery baseline so the Battery tab
+            // never shows or overwrites itself with Low Battery's temporary timeout.
+            if (stateKey === 'battery' && this._settings.get_boolean('recovery-low-bat-active')) {
+                const baseType = this._settings.get_string('recovery-low-bat-baseline-type');
+                const baseTimeout = this._settings.get_int('recovery-low-bat-baseline-timeout');
+                if (baseType) {
+                    return {
+                        action: baseTimeout === 0 ? 'nothing' : baseType,
+                        timeout: baseTimeout > 0 ? baseTimeout : cfg.idleTimeout,
+                    };
+                }
+            }
+
             if (this._gnomePowerSettings) {
                 const typeKey =
                     stateKey === 'ac' ? 'sleep-inactive-ac-type' : 'sleep-inactive-battery-type';
@@ -918,9 +950,18 @@ class PrefsController {
                     stateKey === 'ac'
                         ? 'sleep-inactive-ac-timeout'
                         : 'sleep-inactive-battery-timeout';
+                const rawAction = this._gnomePowerSettings.get_string(typeKey);
+                const rawTimeout = this._gnomePowerSettings.get_int(timeoutKey);
+                // In GNOME Settings, a 0-second timeout means "Never" (disabled)
+                if (rawTimeout === 0 && (rawAction === 'suspend' || rawAction === 'hibernate')) {
+                    return {
+                        action: 'nothing',
+                        timeout: cfg.idleTimeout,
+                    };
+                }
                 return {
-                    action: this._gnomePowerSettings.get_string(typeKey),
-                    timeout: this._gnomePowerSettings.get_int(timeoutKey),
+                    action: rawAction,
+                    timeout: rawTimeout > 0 ? rawTimeout : cfg.idleTimeout,
                 };
             }
             return {

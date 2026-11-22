@@ -232,5 +232,46 @@
       <summary>Show transition notifications</summary>
       <description>Display transient GNOME notifications when Power States switches modes or encounters a backend issue.</description>
     </key>
+
+    <!-- Internal crash-recovery journal keys (not shown in Preferences) -->
+    <key name="recovery-idle-delay-active" type="b">
+      <default>false</default>
+      <summary>Internal: whether Power States holds a recoverable idle-delay override</summary>
+    </key>
+
+    <key name="recovery-idle-delay-baseline" type="u">
+      <default>300</default>
+      <summary>Internal: user idle-delay value saved before extension override</summary>
+    </key>
+
+    <key name="recovery-idle-delay-applied" type="u">
+      <default>300</default>
+      <summary>Internal: last idle-delay value written by extension (for ownership check)</summary>
+    </key>
+
+    <key name="recovery-low-bat-active" type="b">
+      <default>false</default>
+      <summary>Internal: whether Power States holds a temporary Low Battery idle-suspend override</summary>
+    </key>
+
+    <key name="recovery-low-bat-baseline-type" type="s">
+      <default>''</default>
+      <summary>Internal: normal battery sleep-inactive-battery-type saved before Low Battery override</summary>
+    </key>
+
+    <key name="recovery-low-bat-baseline-timeout" type="i">
+      <default>900</default>
+      <summary>Internal: normal battery sleep-inactive-battery-timeout saved before Low Battery override</summary>
+    </key>
+
+    <key name="recovery-low-bat-applied-type" type="s">
+      <default>''</default>
+      <summary>Internal: last Low Battery sleep-inactive-battery-type written by extension</summary>
+    </key>
+
+    <key name="recovery-low-bat-applied-timeout" type="i">
+      <default>300</default>
+      <summary>Internal: last Low Battery sleep-inactive-battery-timeout written by extension</summary>
+    </key>
   </schema>
 </schemalist>

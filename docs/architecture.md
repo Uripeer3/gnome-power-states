@@ -18,9 +18,9 @@ Power States spawns **zero background daemons**, **zero root helpers**, and **ze
 
 | Daemon / Bus | Interface & Path | Checks / Signals Used | Privilege / Polkit Model |
 |---|---|---|---|
-| **UPower** (System bus) | `org.freedesktop.UPower` (`/org/freedesktop/UPower`), `org.freedesktop.UPower.Device` (`DisplayDevice` + every `Type=1` `LINE_POWER` device) | `EnumerateDevices()`, `DeviceAdded`, `DeviceRemoved`, `Online`, `OnBattery`, `State`, `WarningLevel`, `Percentage`, `LidIsPresent` | Read-only; no authentication |
-| **Power Profiles** (System bus) | `org.freedesktop.UPower.PowerProfiles` (fallback: `net.hadess.PowerProfiles`) | Reads `Profiles`, `ActiveProfile`, `PerformanceDegraded`; writes `ActiveProfile` | Active local user allowed by PPD / `tuned-ppd` Polkit policy |
-| **systemd-logind** (System bus) | `org.freedesktop.login1.Manager` (`/org/freedesktop/login1`) | `CanSuspend()`, `CanHibernate()`, `CanHybridSleep()`, `CanSuspendThenHibernate()`, `Inhibit("handle-lid-switch", ..., "block")`, `Suspend(false)`, `Hibernate(false)`, `HybridSleep(false)`, `SuspendThenHibernate(false)`, `LidClosed`, `Docked`, `PrepareForSleep` | Polkit `inhibit-handle-lid-switch`, `suspend`, `hibernate` default to `implicit active: yes` on standard desktop distros (Fedora, Ubuntu, Arch) |
+| **UPower** (System bus) | `org.freedesktop.UPower` (`/org/freedesktop/UPower`), `org.freedesktop.UPower.Device` (`DisplayDevice` + every `Type=1` `LINE_POWER` device) | `EnumerateDevices()`, `DeviceAdded`, `DeviceRemoved`, `Online`, `OnBattery`, `State`, `WarningLevel`, `Percentage`, `LidIsPresent`, **`LidIsClosed`** (dual-source fallback for systemd ≤ 255) | Read-only; no authentication |
+| **Power Profiles** (System bus) | `org.freedesktop.UPower.PowerProfiles` (fallback: `net.hadess.PowerProfiles`) | Reads `Profiles`, `ActiveProfile`, `ActiveProfileHolds`, `PerformanceDegraded`; writes `ActiveProfile`; watches `g-name-owner` for late startup | Active local user allowed by PPD / `tuned-ppd` Polkit policy |
+| **systemd-logind** (System bus) | `org.freedesktop.login1.Manager` (`/org/freedesktop/login1`), `org.freedesktop.login1.Session` (`/org/freedesktop/login1/session/auto`) | `CanSuspend()`, `CanHibernate()`, `CanHybridSleep()`, `CanSuspendThenHibernate()`, `Inhibit("handle-lid-switch", ..., "block")`, bounded `Inhibit("sleep", ..., "delay")` (when MPRIS pause is enabled), `Suspend(false)` / `Hibernate(false)` / `HybridSleep(false)` / `SuspendThenHibernate(false)`, `LidClosed`, `Docked`, `PrepareForSleep`, `Session.Active` (fast user switching) | Polkit `inhibit-handle-lid-switch`, `inhibit-delay-sleep`, `suspend`, `hibernate` default to `implicit active: yes` on standard desktop distros |
 | **Mutter DisplayConfig** (Session bus) | `org.gnome.Mutter.DisplayConfig` (`/org/gnome/Mutter/DisplayConfig`) | `GetCurrentState()` (checks `is-builtin` monitor property), `MonitorsChanged`, writable `PowerSaveMode` (`0`=On, `3`=Off) | Same user session |
 | **GNOME ScreenSaver** (Session bus) | `org.gnome.ScreenSaver` (`/org/gnome/ScreenSaver`) | `Lock()` when lid action is `lock` | Same user session |
 | **MPRIS Media Players** (Session bus) | `org.mpris.MediaPlayer2.*` (`/org/mpris/MediaPlayer2`) | `Pause()` fired on `PrepareForSleep(true)` (only when sleep is actually accepted by `logind`) | Same user session |
@@ -102,9 +102,10 @@ If AC is disconnected while `LidClosed === true` (`ac → battery` or `battery �
 - **Extension schema** (`org.gnome.shell.extensions.power-states`):
   - Per-state (`ac`, `battery`, `low-battery`): `*-power-profile`, `*-lid-action`, `*-lid-ignore-external-monitor`, `*-idle-action`, `*-idle-timeout`, `*-screen-blank`.
   - Global: `sleep-mode`, `low-battery-mode`, `low-battery-percentage`, `unplug-while-closed-mode`, `unplug-while-closed-grace-seconds`, `pause-media-on-suspend`, `notifications`.
+  - Hidden crash-recovery journal (`recovery-idle-delay-*`, `recovery-low-bat-*`): persists pre-override baselines and last-applied values so unclean Shell exits restore cleanly on next startup without clobbering intervening external GNOME Settings edits.
 - **Native GNOME schemas (direct source of truth where native keys exist):**
   - `org.gnome.settings-daemon.plugins.power`: `sleep-inactive-ac-{type,timeout}`, `sleep-inactive-battery-{type,timeout}`.
-  - `org.gnome.desktop.session`: `idle-delay` (managed on transition with ownership check).
+  - `org.gnome.desktop.session`: `idle-delay` (managed on transition with ownership check & external-edit relinquishment).
 
 ### Ephemeral In-Memory State (Lives Only While Enabled)
 
