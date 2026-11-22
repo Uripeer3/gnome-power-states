@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.power-states" path="/org/gnome/shell/extensions/power-states/">
+    <!-- Plugged In (AC) -->
+    <key name="ac-power-profile" type="s">
+      <choices>
+        <choice value="unchanged"/>
+        <choice value="performance"/>
+        <choice value="balanced"/>
+        <choice value="power-saver"/>
+      </choices>
+      <default>'performance'</default>
+      <summary>Power mode when plugged in</summary>
+      <description>Power profile applied automatically upon transitioning to AC power. Manual changes in Quick Settings remain respected until the next power state transition.</description>
+    </key>
+
+    <key name="ac-lid-action" type="s">
+      <choices>
+        <choice value="system"/>
+        <choice value="nothing"/>
+        <choice value="lock"/>
+        <choice value="blank"/>
+        <choice value="suspend"/>
+        <choice value="hibernate"/>
+      </choices>
+      <default>'system'</default>
+      <summary>Lid-close action when plugged in</summary>
+      <description>Action performed when the laptop lid is closed while connected to AC power.</description>
+    </key>
+
+    <key name="ac-lid-ignore-external-monitor" type="b">
+      <default>false</default>
+      <summary>Apply AC lid action even with external monitor connected</summary>
+      <description>When false, closing the lid while an external display is connected keeps the laptop awake in clamshell mode.</description>
+    </key>
+
+    <key name="ac-idle-action" type="s">
+      <choices>
+        <choice value="unchanged"/>
+        <choice value="nothing"/>
+        <choice value="suspend"/>
+        <choice value="hibernate"/>
+      </choices>
+      <default>'unchanged'</default>
+      <summary>Automatic suspend action when plugged in</summary>
+      <description>Synced directly to org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type when not set to unchanged.</description>
+    </key>
+
+    <key name="ac-idle-timeout" type="i">
+      <range min="60" max="14400"/>
+      <default>1800</default>
+      <summary>Automatic suspend delay when plugged in (seconds)</summary>
+      <description>Synced directly to org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout.</description>
+    </key>
+
+    <key name="ac-screen-blank" type="i">
+      <range min="-1" max="7200"/>
+      <default>-1</default>
+      <summary>Screen blank delay when plugged in (seconds)</summary>
+      <description>Value in seconds synced to org.gnome.desktop.session idle-delay on AC transition. -1 leaves it unchanged; 0 means never.</description>
+    </key>
+
+    <!-- On Battery -->
+    <key name="battery-power-profile" type="s">
+      <choices>
+        <choice value="unchanged"/>
+        <choice value="performance"/>
+        <choice value="balanced"/>
+        <choice value="power-saver"/>
+      </choices>
+      <default>'balanced'</default>
+      <summary>Power mode on battery</summary>
+      <description>Power profile applied automatically upon transitioning to normal battery operation.</description>
+    </key>
+
+    <key name="battery-lid-action" type="s">
+      <choices>
+        <choice value="system"/>
+        <choice value="nothing"/>
+        <choice value="lock"/>
+        <choice value="blank"/>
+        <choice value="suspend"/>
+        <choice value="hibernate"/>
+      </choices>
+      <default>'system'</default>
+      <summary>Lid-close action on battery</summary>
+      <description>Action performed when the laptop lid is closed while running on battery.</description>
+    </key>
+
+    <key name="battery-lid-ignore-external-monitor" type="b">
+      <default>false</default>
+      <summary>Apply battery lid action even with external monitor connected</summary>
+      <description>When false, closing the lid while an external display is connected keeps the laptop awake in clamshell mode.</description>
+    </key>
+
+    <key name="battery-idle-action" type="s">
+      <choices>
+        <choice value="unchanged"/>
+        <choice value="nothing"/>
+        <choice value="suspend"/>
+        <choice value="hibernate"/>
+      </choices>
+      <default>'unchanged'</default>
+      <summary>Automatic suspend action on battery</summary>
+      <description>Synced directly to org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type when not set to unchanged.</description>
+    </key>
+
+    <key name="battery-idle-timeout" type="i">
+      <range min="60" max="14400"/>
+      <default>900</default>
+      <summary>Automatic suspend delay on battery (seconds)</summary>
+      <description>Synced directly to org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout.</description>
+    </key>
+
+    <key name="battery-screen-blank" type="i">
+      <range min="-1" max="7200"/>
+      <default>-1</default>
+      <summary>Screen blank delay on battery (seconds)</summary>
+      <description>Value in seconds synced to org.gnome.desktop.session idle-delay on battery transition. -1 leaves it unchanged; 0 means never.</description>
+    </key>
+
+    <!-- Low Battery -->
+    <key name="low-battery-power-profile" type="s">
+      <choices>
+        <choice value="unchanged"/>
+        <choice value="performance"/>
+        <choice value="balanced"/>
+        <choice value="power-saver"/>
+      </choices>
+      <default>'power-saver'</default>
+      <summary>Power mode on low battery</summary>
+      <description>Power profile applied automatically upon entering low battery state.</description>
+    </key>
+
+    <key name="low-battery-lid-action" type="s">
+      <choices>
+        <choice value="system"/>
+        <choice value="nothing"/>
+        <choice value="lock"/>
+        <choice value="blank"/>
+        <choice value="suspend"/>
+        <choice value="hibernate"/>
+      </choices>
+      <default>'system'</default>
+      <summary>Lid-close action on low battery</summary>
+      <description>Action performed when the laptop lid is closed while on low battery.</description>
+    </key>
+
+    <key name="low-battery-lid-ignore-external-monitor" type="b">
+      <default>false</default>
+      <summary>Apply low-battery lid action even with external monitor connected</summary>
+      <description>When true, forces the configured low-battery lid action even if an external monitor is connected.</description>
+    </key>
+
+    <key name="low-battery-idle-action" type="s">
+      <choices>
+        <choice value="unchanged"/>
+        <choice value="nothing"/>
+        <choice value="suspend"/>
+        <choice value="hibernate"/>
+      </choices>
+      <default>'unchanged'</default>
+      <summary>Automatic suspend action on low battery</summary>
+      <description>Temporarily applied to sleep-inactive-battery-type while in low battery state, and restored upon leaving low battery.</description>
+    </key>
+
+    <key name="low-battery-idle-timeout" type="i">
+      <range min="60" max="14400"/>
+      <default>300</default>
+      <summary>Automatic suspend delay on low battery (seconds)</summary>
+      <description>Temporarily applied to sleep-inactive-battery-timeout while in low battery state.</description>
+    </key>
+
+    <key name="low-battery-screen-blank" type="i">
+      <range min="-1" max="7200"/>
+      <default>-1</default>
+      <summary>Screen blank delay on low battery (seconds)</summary>
+      <description>Value in seconds synced to org.gnome.desktop.session idle-delay on low battery transition. -1 leaves it unchanged; 0 means never.</description>
+    </key>
+
+    <!-- Global Policies & Guardrails -->
+    <key name="sleep-mode" type="s">
+      <choices>
+        <choice value="suspend"/>
+        <choice value="suspend-then-hibernate"/>
+        <choice value="hybrid-sleep"/>
+      </choices>
+      <default>'suspend'</default>
+      <summary>Sleep mode for suspend actions</summary>
+      <description>Determines whether lid-close Suspend uses Standby (RAM), Suspend then Hibernate, or Hybrid Sleep.</description>
+    </key>
+
+    <key name="low-battery-mode" type="s">
+      <choices>
+        <choice value="upower"/>
+        <choice value="percentage"/>
+      </choices>
+      <default>'upower'</default>
+      <summary>Low battery trigger source</summary>
+      <description>Use UPower's system WarningLevel (recommended) or a custom battery percentage threshold.</description>
+    </key>
+
+    <key name="low-battery-percentage" type="i">
+      <range min="5" max="50"/>
+      <default>20</default>
+      <summary>Custom low battery percentage</summary>
+      <description>Battery percentage at or below which Low Battery state activates when low-battery-mode is set to percentage.</description>
+    </key>
+
+    <key name="remember-manual-profile" type="b">
+      <default>false</default>
+      <summary>Remember manual Quick Settings profile changes</summary>
+      <description>When disabled (recommended), manual Power Mode changes in GNOME Quick Settings are temporary overrides until the next power state transition. When enabled, manual changes become the new default for AC or Battery.</description>
+    </key>
+
+    <key name="pause-media-on-suspend" type="b">
+      <default>true</default>
+      <summary>Pause media players before lid-triggered suspend</summary>
+      <description>Sends an MPRIS Pause command to active media players before suspending or hibernating on lid close.</description>
+    </key>
+
+    <key name="unplug-while-closed-grace-seconds" type="i">
+      <range min="0" max="30"/>
+      <default>3</default>
+      <summary>Grace delay when unplugged with lid already closed (seconds)</summary>
+      <description>Delay before applying the battery lid-close action if AC power is disconnected while the laptop lid is already closed.</description>
+    </key>
+
+    <key name="notifications" type="b">
+      <default>false</default>
+      <summary>Show transition notifications</summary>
+      <description>Display transient GNOME notifications when Power States switches modes or encounters a backend issue.</description>
+    </key>
+  </schema>
+</schemalist>

@@ -1,0 +1,115 @@
+# Power States for GNOME
+
+Per-state laptop power management for GNOME (**Plugged In**, **On Battery**, and **Low Battery**), inspired by KDE Plasma 6's PowerDevil while staying native to GNOME's Libadwaita design and philosophy.
+
+No `sudo`, no background root daemon, no `/etc/systemd/logind.conf` edits, and no top-bar or Quick Settings clutter.
+
+---
+
+## Philosophy: Transition Defaults, Not Hard Locks
+
+Power States deliberately **does not touch GNOME Quick Settings** and **never enforces a hard lock** on your Power Mode.
+
+- It defines **what happens automatically upon a physical power transition** (plugging in AC, unplugging to battery, or entering/leaving low battery).
+- If you manually switch Power Mode in GNOME Quick Settings (for example, switching to *Performance* on battery for a build, or *Power Saver* on AC during a quiet call), **your manual choice is respected for as long as you remain in that power state**.
+- Automation steps in again only on the next physical transition — or if you explicitly opt into *"Remember Manual Quick Settings Changes"* in Preferences.
+
+---
+
+## Features (v1)
+
+### Per-State Policies (`Plugged In` | `On Battery` | `Low Battery`)
+- **Power Mode**: Automatically switch between *Performance*, *Balanced*, *Power Saver*, or *Leave Unchanged* via `power-profiles-daemon` or `tuned-ppd`.
+- **When Laptop Lid Closes (Zero Root)**: Choose *System Default*, *Do Nothing*, *Lock Screen*, *Turn Off Screen*, *Suspend*, or *Hibernate* independently per power state using an unprivileged `systemd-logind` `handle-lid-switch` session inhibitor.
+- **Clamshell / External Monitor Awareness**: Each state includes an *"Even When an External Monitor Is Connected"* toggle (off by default, so closing the lid while docked stays awake unless you explicitly opt in).
+- **Automatic Suspend (Synced with GNOME Settings)**: Directly synchronizes AC and Battery inactivity settings with GNOME's native `org.gnome.settings-daemon.plugins.power` keys (`sleep-inactive-ac-*` and `sleep-inactive-battery-*`), plus a temporary override while in *Low Battery* that restores cleanly on exit.
+- **Screen Blank Delay**: Per-state `org.gnome.desktop.session` `idle-delay` (optional; defaults to *Leave Unchanged* and restores your original baseline if the extension is disabled).
+
+### Global Policies & Guardrails
+- **Separated Sleep Mode**: Configure *"When Sleeping, Enter"* (*Standby*, *Suspend, then Hibernate*, or *Hybrid Sleep*) once globally — automatically hidden if your hardware only supports one sleep mode.
+- **Low Battery Trigger**: Uses UPower's native `WarningLevel` by default (displaying your `/etc/UPower/UPower.conf` `PercentageLow` threshold), or an optional custom battery percentage.
+- **Unplug-While-Closed Grace Delay**: If AC is disconnected while the laptop lid is already closed (e.g., an accidental cable bump), waits a configurable grace period (default `3s`) before applying the Battery lid action.
+- **Pause Media Players on Suspend**: Automatically sends MPRIS `Pause` to active players before lid-triggered suspend or hibernate.
+- **Contextual Conflict Guardrails**: Surfaces an inline `Adw.Banner` in Preferences only when settings conflict (e.g., Screen Blank set at or after Automatic Suspend, or Battery Lid set to *Do Nothing*).
+- **Reliable AC Detection**: Subscribes to **all** UPower `LINE_POWER` devices (plus hotplug events) alongside `DisplayDevice`, avoiding missed AC reconnects on laptops with battery charge thresholds or multiple USB-C PD ports.
+
+---
+
+## Compatibility & Requirements
+
+- **GNOME Shell**: 45 through 51+
+- **Power Profiles backend**: `power-profiles-daemon` or Fedora's `tuned-ppd` (optional — lid and idle controls work even without a PPD backend)
+- **UPower** and **systemd-logind** (standard on Fedora, Ubuntu, Arch, openSUSE, and atomic/immutable desktops like Silverblue/Bluefin)
+
+> [!NOTE]
+> `metadata.json` declares `"session-modes": ["user", "unlock-dialog"]` so locking the screen does **not** disable the extension and drop the unprivileged `handle-lid-switch` inhibitor FD while the laptop lid is closed.
+
+---
+
+## Installation
+
+### From source (local user install — no root required)
+
+```bash
+git clone https://github.com/Uripeer3/gnome-power-states.git
+cd gnome-power-states
+make install
+```
+
+On Wayland, log out and log back in once so GNOME Shell discovers the newly installed extension, then enable it and open Preferences:
+
+```bash
+make enable
+make prefs
+```
+
+> [!TIP]
+> If you previously used `auto-power-profile` or a separate lid-close extension (like *Ignore Lid* or *Suspend on Lid Close*), disable them before enabling **Power States** so two extensions do not write the same power profile or lid policy concurrently.
+
+### Packaging for `extensions.gnome.org`
+
+```bash
+make pack
+```
+
+---
+
+## Development & Testing
+
+```bash
+# Compile GSettings schema and run pure policy-engine unit tests
+make test
+
+# Uninstall cleanly
+make uninstall
+```
+
+### Architecture Overview
+
+```text
+gnome-power-states/
+├── metadata.json                # GNOME 45–51+, user + unlock-dialog session modes
+├── extension.js                 # Thin lifecycle orchestrator (zero UI/Quick Settings edits)
+├── prefs.js                     # Libadwaita single-page UI (scoped state bar + global guardrails)
+├── schemas/
+│   └── org.gnome.shell.extensions.power-states.gschema.xml
+├── lib/
+│   ├── policyEngine.js          # Pure, unit-tested state, transition, lid, and conflict logic
+│   ├── upowerWatcher.js         # DisplayDevice + ALL LINE_POWER devices + hotplug signals
+│   ├── profileController.js     # PowerProfiles D-Bus + Quick Settings override detection + lap retry
+│   ├── lidController.js         # Unprivileged login1 FD inhibitor + LidClosed + DisplayConfig check
+│   ├── idleController.js        # Native gsd-power sync + idle-delay baseline snapshot/restore
+│   ├── mprisHelper.js           # Best-effort MPRIS Pause before lid sleep
+│   ├── capabilities.js          # Hardware & daemon capability prober
+│   ├── configStore.js           # Typed GSettings readers
+│   ├── dbusXml.js               # Self-contained D-Bus interface definitions
+│   └── upowerConfig.js          # Read-only /etc/UPower/UPower.conf parser
+└── tests/
+    └── policyEngine.test.js     # GJS unit tests
+```
+
+---
+
+## License
+
+[GNU General Public License v3.0 or later](LICENSE)

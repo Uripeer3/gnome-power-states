@@ -1,0 +1,21 @@
+{
+  "uuid": "power-states@uripeer3.github.io",
+  "name": "Power States",
+  "description": "Per-state GNOME power management (Plugged In, On Battery, Low Battery) for Power Mode, unprivileged lid-close actions, native auto-suspend sync, and screen blanking.",
+  "url": "https://github.com/Uripeer3/gnome-power-states",
+  "settings-schema": "org.gnome.shell.extensions.power-states",
+  "gettext-domain": "power-states@uripeer3.github.io",
+  "session-modes": [
+    "user",
+    "unlock-dialog"
+  ],
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50",
+    "51"
+  ]
+}
