@@ -12,6 +12,7 @@ compile-schemas:
 
 test: compile-schemas
 	gjs -m tests/policyEngine.test.js
+	gjs -m tests/lidController.test.js
 
 check-syntax:
 	@for f in extension.js prefs.js lib/*.js tests/*.js; do \

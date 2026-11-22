@@ -19,8 +19,10 @@ jobs:
       - name: Validate GSettings schema
         run: glib-compile-schemas --strict schemas
 
-      - name: Run policy engine unit tests
-        run: gjs -m tests/policyEngine.test.js
+      - name: Run unit and controller regression tests
+        run: |
+          gjs -m tests/policyEngine.test.js
+          gjs -m tests/lidController.test.js
 
       - name: Validate metadata.json
         run: python3 -m json.tool metadata.json >/dev/null

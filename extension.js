@@ -29,15 +29,24 @@ import { ProfileController } from './lib/profileController.js';
 import { UPowerWatcher } from './lib/upowerWatcher.js';
 
 export default class PowerStatesExtension extends Extension {
+    constructor(metadata) {
+        super(metadata);
+        this._initGeneration = 0;
+    }
+
     enable() {
+        const generation = ++this._initGeneration;
         this._destroyed = false;
+        this._initialized = false;
+
         this._settings = this.getSettings(SCHEMA_ID);
-        this._settingsChangedId = this._settings.connect('changed', () => {
-            this._onSettingsChanged();
+        this._settingsChangedId = this._settings.connect('changed', (_s, key) => {
+            this._onSettingsChanged(key);
         });
 
         this._capabilities = {
             lidIsPresent: true,
+            login1Probed: false,
             canSuspend: true,
             canHibernate: false,
             canHybridSleep: false,
@@ -56,17 +65,21 @@ export default class PowerStatesExtension extends Extension {
             onLapRetry: () => this._onLapRetry(),
         });
         this._lidController = new LidController({
-            onLidCloseRequested: () => this._onLidClosed(),
+            onLidCloseRequested: gen => this._onLidClosed(gen),
+            shouldPauseMediaOnSleep: () =>
+                Boolean(this._settings?.get_boolean('pause-media-on-suspend')),
             onError: msg => this._notify(msg, true),
         });
 
-        this._initAsync().catch(e => {
+        this._initAsync(generation).catch(e => {
+            if (this._destroyed || generation !== this._initGeneration)
+                return;
             console.error(`[power-states] Initialization failed: ${e.message}`);
             this._notify(_('Failed to initialize Power States services.'), true);
         });
     }
 
-    async _initAsync() {
+    async _initAsync(generation) {
         const [capabilities] = await Promise.all([
             probeSystemCapabilities(),
             this._upowerWatcher.initialize(),
@@ -76,10 +89,12 @@ export default class PowerStatesExtension extends Extension {
             }),
         ]);
 
-        if (this._destroyed)
+        // Guard against rapid disable() + enable() leaving a stale continuation
+        if (this._destroyed || generation !== this._initGeneration)
             return;
 
         this._capabilities = capabilities;
+        this._initialized = true;
         this._reconcile(this._upowerWatcher.getReading(), true);
     }
 
@@ -87,7 +102,9 @@ export default class PowerStatesExtension extends Extension {
         // NOTE: metadata.json includes "unlock-dialog" in session-modes so locking
         // the screen does NOT call disable() and drop our handle-lid-switch FD
         // while the laptop lid is closed or keep-awake on AC is active.
+        this._initGeneration++;
         this._destroyed = true;
+        this._initialized = false;
 
         if (this._settings && this._settingsChangedId) {
             this._settings.disconnect(this._settingsChangedId);
@@ -118,14 +135,41 @@ export default class PowerStatesExtension extends Extension {
         return configs;
     }
 
-    _onSettingsChanged() {
-        if (this._destroyed || !this._upowerWatcher)
+    /**
+     * Route GSettings updates by key so unrelated preference edits (such as
+     * notifications, lid policy, idle delays, or an inactive state's profile)
+     * NEVER undo a user's manual Quick Settings Power Mode choice.
+     */
+    _onSettingsChanged(key) {
+        if (this._destroyed || !this._initialized || !this._upowerWatcher || !this._settings)
             return;
 
-        // Explicit user edit in Preferences reconciles immediately and clears
-        // any prior temporary Quick Settings override.
-        this._manualOverrideActive = false;
-        this._reconcile(this._upowerWatcher.getReading(), true);
+        // If the user explicitly edited AC or Battery Automatic Suspend in our prefs,
+        // sync that state directly to GNOME's native gsd-power keys.
+        if (key === 'ac-idle-action' || key === 'ac-idle-timeout') {
+            this._idleController?.syncExplicitNativeAutoSuspend(
+                'ac',
+                readStateConfig(this._settings, 'ac')
+            );
+        } else if (key === 'battery-idle-action' || key === 'battery-idle-timeout') {
+            this._idleController?.syncExplicitNativeAutoSuspend(
+                'battery',
+                readStateConfig(this._settings, 'battery')
+            );
+        }
+
+        // Only force-reapply the Power Mode if the user edited the *active* state's
+        // power-profile setting directly. Low-battery trigger edits allow natural
+        // state transition without forcibly overriding an unchanged state.
+        const activeProfileKey = this._lastPolicyState
+            ? `${this._lastPolicyState}-power-profile`
+            : null;
+        const editedActiveProfile = activeProfileKey !== null && key === activeProfileKey;
+
+        if (editedActiveProfile)
+            this._manualOverrideActive = false;
+
+        this._reconcile(this._upowerWatcher.getReading(), editedActiveProfile);
     }
 
     _onExternalProfileChange(newProfile) {
@@ -155,7 +199,7 @@ export default class PowerStatesExtension extends Extension {
     }
 
     _onLapRetry() {
-        if (this._destroyed || this._manualOverrideActive || !this._upowerWatcher)
+        if (this._destroyed || !this._initialized || this._manualOverrideActive || !this._upowerWatcher)
             return;
 
         if (this._lastPolicyState === 'ac')
@@ -163,7 +207,7 @@ export default class PowerStatesExtension extends Extension {
     }
 
     _reconcile(reading, forceProfile) {
-        if (this._destroyed || !this._settings)
+        if (this._destroyed || !this._initialized || !this._settings)
             return;
 
         const globalConfig = readGlobalConfig(this._settings);
@@ -202,48 +246,60 @@ export default class PowerStatesExtension extends Extension {
             }
         }
 
-        // 2. Native Idle Suspend & Screen Blank sync
+        // 2. Runtime Idle Override (Low Battery) & Screen Blank sync
         this._idleController?.applyForState(nextState, stateConfigs);
 
-        // 3. Lid-Close Inhibitor & Closed-Lid Transition Handling
+        // 3. Lid-Close Inhibitor & Closed-Lid Transition Handling (skip on desktops without a lid)
         if (this._lidController) {
-            const lidDecision = resolveLidDecision({
-                stateConfig: activeStateConfig,
-                externalMonitorConnected: this._lidController.externalMonitorConnected,
-                sleepMode: globalConfig.sleepMode,
-                capabilities: this._capabilities,
-            });
+            if (!this._capabilities.lidIsPresent) {
+                this._lidController.setInhibitDesired(false);
+            } else {
+                const lidDecision = resolveLidDecision({
+                    stateConfig: activeStateConfig,
+                    externalMonitorConnected: this._lidController.externalMonitorConnected,
+                    sleepMode: globalConfig.sleepMode,
+                    capabilities: this._capabilities,
+                });
 
-            this._lidController.setInhibitDesired(
-                lidDecision.needsInhibitor,
-                `Power States (${nextState}: ${activeStateConfig.lidAction})`
-            );
-
-            // If we moved into a stricter state (e.g. unplugged AC -> Battery) while the lid
-            // is ALREADY shut, apply the new lid action after the configured grace delay.
-            const closedCheck = shouldTriggerClosedLidActionOnTransition({
-                lidClosed: this._lidController.lidClosed,
-                previousState,
-                nextState,
-                nextLidDecision: lidDecision,
-            });
-
-            if (closedCheck.shouldTrigger) {
-                this._lidController.scheduleGraceAction(
-                    globalConfig.unplugWhileClosedGraceSeconds,
-                    () => this._onLidClosed()
+                this._lidController.setInhibitDesired(
+                    lidDecision.needsInhibitor,
+                    `Power States (${nextState}: ${activeStateConfig.lidAction})`
                 );
-            } else if (stateChanged) {
-                this._lidController.cancelGraceTimer();
+
+                // If we moved into a stricter state (e.g. unplugged AC -> Battery) while the lid
+                // is ALREADY shut, apply the new lid action after the configured grace delay.
+                const closedCheck = shouldTriggerClosedLidActionOnTransition({
+                    lidClosed: this._lidController.lidClosed,
+                    previousState,
+                    nextState,
+                    nextLidDecision: lidDecision,
+                });
+
+                if (closedCheck.shouldTrigger) {
+                    this._lidController.scheduleGraceAction(
+                        globalConfig.unplugWhileClosedGraceSeconds,
+                        gen => this._onLidClosed(gen)
+                    );
+                } else if (stateChanged) {
+                    this._lidController.cancelGraceTimer();
+                }
             }
         }
 
         this._lastPolicyState = nextState;
     }
 
-    _onLidClosed() {
-        if (this._destroyed || !this._settings || !this._lidController || !this._upowerWatcher)
+    _onLidClosed(expectedGeneration) {
+        if (
+            this._destroyed ||
+            !this._initialized ||
+            !this._settings ||
+            !this._lidController ||
+            !this._upowerWatcher ||
+            !this._capabilities.lidIsPresent
+        ) {
             return;
+        }
 
         const reading = this._upowerWatcher.getReading();
         const globalConfig = readGlobalConfig(this._settings);
@@ -257,11 +313,7 @@ export default class PowerStatesExtension extends Extension {
             capabilities: this._capabilities,
         });
 
-        this._lidController.executeAction(decision.actionOnClose, {
-            pauseMedia: globalConfig.pauseMediaOnSuspend,
-        }).catch(e => {
-            console.error(`[power-states] Lid action execution error: ${e.message}`);
-        });
+        this._lidController.executeAction(decision.actionOnClose, { expectedGeneration });
     }
 
     _stateLabel(stateKey) {
