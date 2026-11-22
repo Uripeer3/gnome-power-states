@@ -24,11 +24,11 @@ check-syntax:
 		if printf '%s\n' "$$out" | grep -qi "SyntaxError"; then \
 			echo "SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
 		fi; \
-		for rel in $$(grep -oE "from ['\"]\./[^'\"]+['\"]" "$$f" | sed -E "s/from ['\"](\.[^'\"]+)['\"]/\1/"); do \
+		for rel in $$(grep -oE "(from|import)[[:space:]]*\(?[[:space:]]*['\"]\./[^'\"]+['\"]" "$$f" | sed -E "s/.*['\"](\.\/[^'\"]+)['\"]/\1/"); do \
 			test -f "$$rel" || { echo "MISSING LOCAL IMPORT in $$f: $$rel"; exit 1; }; \
 		done; \
 	done
-	@echo "All library modules loaded and entry-point syntax + local import targets verified"
+	@echo "Libraries loaded; entry-point syntax and static/dynamic relative './' targets verified"
 	glib-compile-schemas --strict --dry-run $(SCHEMA_DIR)
 
 install: compile-schemas

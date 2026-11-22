@@ -336,7 +336,7 @@ export default class PowerStatesExtension extends Extension {
                 const decision = resolveProfileTransition({
                     powerState: nextState,
                     lastPolicyState: previousState,
-                    activeProfile: this._profileController.activeProfile,
+                    activeProfile: this._profileController.effectiveProfile,
                     manualOverrideActive: this._manualOverrideActive,
                     force: forceProfile,
                     stateConfig: activeStateConfig,

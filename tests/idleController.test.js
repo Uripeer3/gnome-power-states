@@ -164,6 +164,7 @@ const sampleConfigs = {
 })();
 
 // 3. Regression: Legacy 328d73c `recovery-low-bat-active` upgrade migration
+//    (including partial migration when user externally edited timeout while Shell was down!)
 (() => {
     const ext = makeDefaultExtSettings();
     ext.set_boolean('recovery-low-bat-active', true);
@@ -172,21 +173,53 @@ const sampleConfigs = {
     ext.set_string('recovery-low-bat-applied-type', 'suspend');
     ext.set_int('recovery-low-bat-applied-timeout', 300);
 
+    // Type still matches 328d73c override ('suspend'), but user edited timeout to 1200!
     const power = makeFakeSettings({
         'sleep-inactive-battery-type': 'suspend',
-        'sleep-inactive-battery-timeout': 300,
+        'sleep-inactive-battery-timeout': 1200,
     });
     const session = makeFakeSettings({ 'idle-delay': 600 });
 
     const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     assertEqual(ext.get_boolean('recovery-low-bat-active'), false, 'legacy flag cleared');
-    assertEqual(ext.get_boolean('recovery-low-bat-type-active'), true, 'migrated type ownership');
-    assertEqual(ext.get_boolean('recovery-low-bat-timeout-active'), true, 'migrated timeout ownership');
+    assertEqual(ext.get_boolean('recovery-low-bat-type-active'), true, 'migrated matching type ownership');
+    assertEqual(ext.get_boolean('recovery-low-bat-timeout-active'), false, 'did not claim externally edited timeout');
 
-    idle.applyForState('ac', sampleConfigs, { isInitialStartup: true });
+    // Starting up STILL in Low Battery MUST preserve user's 1200 (not overwrite back to 300!)
+    idle.applyForState('low-battery', sampleConfigs, { isInitialStartup: true });
+    assertEqual(
+        power.get_int('sleep-inactive-battery-timeout'),
+        1200,
+        'legacy partial migration preserves externally edited 1200 timeout on Low Battery startup'
+    );
+
+    // Leaving Low Battery restores original type='nothing' while preserving 1200!
+    idle.applyForState('ac', sampleConfigs, { stateChanged: true });
     assertEqual(power.get_string('sleep-inactive-battery-type'), 'nothing', 'migrated type restored');
-    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1800, 'migrated timeout restored');
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1200, 'user timeout 1200 preserved');
     idle.destroy();
+})();
+
+// 3b. Regression: Rejected journal write prevents native key mutation cleanly
+(() => {
+    const ext = makeDefaultExtSettings();
+    ext.setWritable('recovery-idle-delay-active', false);
+
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(
+        session.get_uint('idle-delay'),
+        600,
+        'unwritable journal prevents native idle-delay mutation'
+    );
+    idle.destroy();
+    assertEqual(session.get_uint('idle-delay'), 600, 'idle-delay stays 600 after destroy');
 })();
 
 // 4. Regression: Failed restore on temporarily unwritable key preserves journal for retry
