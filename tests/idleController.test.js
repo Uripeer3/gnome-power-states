@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Regression tests for IdleController:
-//   1. Per-key independent ownership: editing ONLY timeout externally preserves
-//      restoration of `sleep-inactive-battery-type` (e.g. nothing -> suspend -> nothing!)
-//   2. Routine UPower ticks never overwrite external GNOME Settings edits
-//   3. WAL crash recovery across a truly detached crashed process (including
-//      preserving intervening edits made while Shell was down, even on startup!)
-//   4. Single-source-of-truth baseline updates from Preferences during Low Battery
-//   5. Explicit Preferences edits re-claim ownership after external overrides
+//   1. Per-key independent ownership (editing ONLY timeout restores type='nothing')
+//   2. 2-phase WAL interrupted second write (600 -> 300 -> pending 60) restores 600
+//   3. Legacy 328d73c `recovery-low-bat-active` upgrade migration
+//   4. Unwritable native key during restore preserves journal for later retry
+//   5. True detached process crash + intervening external edit preservation
+//   6. Single-source-of-truth baseline updates from Preferences during Low Battery
 
 import { IdleController } from '../lib/idleController.js';
 
@@ -24,6 +23,7 @@ function assertEqual(actual, expected, label) {
 
 function makeFakeSettings(initial = {}) {
     const store = { ...initial };
+    const writable = {};
     const listeners = new Map();
     let nextId = 1;
 
@@ -36,26 +36,41 @@ function makeFakeSettings(initial = {}) {
 
     const api = {
         store,
-        is_writable: () => true,
+        setWritable(key, flag) {
+            writable[key] = flag;
+        },
+        is_writable: k => writable[k] !== false,
         get_boolean: k => Boolean(store[k]),
         set_boolean: (k, v) => {
+            if (!api.is_writable(k))
+                return false;
             store[k] = Boolean(v);
             emit(k);
+            return true;
         },
         get_int: k => Number(store[k] ?? 0),
         set_int: (k, v) => {
+            if (!api.is_writable(k))
+                return false;
             store[k] = Number(v);
             emit(k);
+            return true;
         },
         get_uint: k => Number(store[k] ?? 0),
         set_uint: (k, v) => {
+            if (!api.is_writable(k))
+                return false;
             store[k] = Number(v);
             emit(k);
+            return true;
         },
         get_string: k => String(store[k] ?? ''),
         set_string: (k, v) => {
+            if (!api.is_writable(k))
+                return false;
             store[k] = String(v);
             emit(k);
+            return true;
         },
         connect(signal, cb) {
             const id = nextId++;
@@ -65,7 +80,6 @@ function makeFakeSettings(initial = {}) {
         disconnect(id) {
             listeners.delete(id);
         },
-        // Helper to simulate an unclean process crash (tears down listeners without destroy())
         simulateProcessCrash() {
             listeners.clear();
         },
@@ -78,12 +92,16 @@ function makeDefaultExtSettings() {
         'recovery-idle-delay-active': false,
         'recovery-idle-delay-baseline': 300,
         'recovery-idle-delay-applied': 300,
+        'recovery-idle-delay-pending': -1,
+        'recovery-low-bat-active': false,
         'recovery-low-bat-type-active': false,
         'recovery-low-bat-timeout-active': false,
         'recovery-low-bat-baseline-type': '',
         'recovery-low-bat-baseline-timeout': 900,
         'recovery-low-bat-applied-type': '',
         'recovery-low-bat-applied-timeout': 300,
+        'recovery-low-bat-pending-type': '',
+        'recovery-low-bat-pending-timeout': -1,
     });
 }
 
@@ -93,8 +111,7 @@ const sampleConfigs = {
     'low-battery': { idleAction: 'suspend', idleTimeout: 300, screenBlank: 60 },
 };
 
-// 1. Regression: Per-key ownership — externally editing ONLY timeout preserves
-//    restoration of sleep-inactive-battery-type from 'suspend' back to 'nothing'!
+// 1. Per-key ownership: editing ONLY timeout externally preserves restoration of type='nothing'
 (() => {
     const ext = makeDefaultExtSettings();
     const power = makeFakeSettings({
@@ -106,35 +123,73 @@ const sampleConfigs = {
     const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
 
-    assertEqual(power.get_string('sleep-inactive-battery-type'), 'suspend', 'low-bat type applied');
-    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 300, 'low-bat timeout applied');
-
-    // User externally edits ONLY the timeout to 1200 (and idle-delay to 900)
     power.set_int('sleep-inactive-battery-timeout', 1200);
     session.set_uint('idle-delay', 900);
 
-    // Routine tick must preserve external edits
     idle.applyForState('low-battery', sampleConfigs, { stateChanged: false });
     assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1200, 'routine tick keeps timeout 1200');
     assertEqual(session.get_uint('idle-delay'), 900, 'routine tick keeps idle-delay 900');
 
-    // Destroy MUST restore original type='nothing' while keeping user's 1200 & 900!
     idle.destroy();
-    assertEqual(
-        power.get_string('sleep-inactive-battery-type'),
-        'nothing',
-        'destroy restores original battery type=nothing even after timeout was edited externally'
-    );
-    assertEqual(
-        power.get_int('sleep-inactive-battery-timeout'),
-        1200,
-        'destroy preserves externally edited battery timeout 1200'
-    );
-    assertEqual(session.get_uint('idle-delay'), 900, 'destroy preserves externally edited idle-delay');
+    assertEqual(power.get_string('sleep-inactive-battery-type'), 'nothing', 'restores type=nothing');
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1200, 'keeps user timeout=1200');
+    assertEqual(session.get_uint('idle-delay'), 900, 'keeps user idle-delay=900');
 })();
 
-// 2. Regression: True process crash (listeners torn down without destroy()) still
-//    restores baselines on next startup on AC.
+// 2. Regression: 2-phase WAL interrupted SECOND write of an already-owned key (600 -> 300 -> pending 60)
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle1 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    // First transition: Battery applies 300 (baseline=600, applied=300)
+    idle1.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 300, 'first override applied 300');
+
+    // Simulate interruption right AFTER preparing second journal (pending=60) BEFORE native write
+    idle1._prepareIdleDelayJournal(600, 60, true);
+    power.simulateProcessCrash();
+    session.simulateProcessCrash();
+    // Native key is still 300!
+    assertEqual(session.get_uint('idle-delay'), 300, 'native stayed 300 on crash before 2nd write');
+
+    // Process 2 starts fresh and disables -> MUST still restore original baseline 600!
+    const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle2.destroy();
+    assertEqual(session.get_uint('idle-delay'), 600, '2-phase WAL restores original 600 after interrupted 2nd write');
+})();
+
+// 3. Regression: Legacy 328d73c `recovery-low-bat-active` upgrade migration
+(() => {
+    const ext = makeDefaultExtSettings();
+    ext.set_boolean('recovery-low-bat-active', true);
+    ext.set_string('recovery-low-bat-baseline-type', 'nothing');
+    ext.set_int('recovery-low-bat-baseline-timeout', 1800);
+    ext.set_string('recovery-low-bat-applied-type', 'suspend');
+    ext.set_int('recovery-low-bat-applied-timeout', 300);
+
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 300,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    assertEqual(ext.get_boolean('recovery-low-bat-active'), false, 'legacy flag cleared');
+    assertEqual(ext.get_boolean('recovery-low-bat-type-active'), true, 'migrated type ownership');
+    assertEqual(ext.get_boolean('recovery-low-bat-timeout-active'), true, 'migrated timeout ownership');
+
+    idle.applyForState('ac', sampleConfigs, { isInitialStartup: true });
+    assertEqual(power.get_string('sleep-inactive-battery-type'), 'nothing', 'migrated type restored');
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1800, 'migrated timeout restored');
+    idle.destroy();
+})();
+
+// 4. Regression: Failed restore on temporarily unwritable key preserves journal for retry
 (() => {
     const ext = makeDefaultExtSettings();
     const power = makeFakeSettings({
@@ -143,24 +198,23 @@ const sampleConfigs = {
     });
     const session = makeFakeSettings({ 'idle-delay': 600 });
 
-    const idle1 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
-    idle1.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
 
-    // Crash process 1 cleanly (detaches listeners without calling destroy)
-    power.simulateProcessCrash();
-    session.simulateProcessCrash();
+    // Key temporarily becomes unwritable when exiting Low Battery
+    session.setWritable('idle-delay', false);
+    idle.applyForState('ac', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 60, 'unwritable key still at 60');
+    assertEqual(ext.get_boolean('recovery-idle-delay-active'), true, 'journal preserved for retry');
 
-    const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
-    idle2.applyForState('ac', sampleConfigs, { isInitialStartup: true });
-
-    assertEqual(power.get_string('sleep-inactive-battery-type'), 'nothing', 'post-crash restores type');
-    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1800, 'post-crash restores timeout');
-    assertEqual(session.get_uint('idle-delay'), 600, 'post-crash restores idle-delay');
-    idle2.destroy();
+    // Key becomes writable again -> destroy retries and restores 600 cleanly!
+    session.setWritable('idle-delay', true);
+    idle.destroy();
+    assertEqual(session.get_uint('idle-delay'), 600, 'retry restored original 600');
+    assertEqual(ext.get_boolean('recovery-idle-delay-active'), false, 'journal cleared after successful restore');
 })();
 
-// 3. Regression: Intervening external edit while Shell was crashed is preserved
-//    even if Process 2 starts back up in the SAME low-battery state!
+// 5. Regression: Intervening external edit while Shell was crashed is preserved on startup
 (() => {
     const ext = makeDefaultExtSettings();
     const power = makeFakeSettings({
@@ -171,31 +225,21 @@ const sampleConfigs = {
 
     const idle1 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     idle1.applyForState('low-battery', sampleConfigs, { stateChanged: true });
-
-    // Simulate true crash (idle1 can no longer listen or clear its own journal)
     power.simulateProcessCrash();
     session.simulateProcessCrash();
 
-    // User edits idle-delay to 480 while Shell is down
     session.set_uint('idle-delay', 480);
 
-    // Process 2 starts back up STILL in low-battery -> must preserve 480!
     const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     idle2.applyForState('low-battery', sampleConfigs, { isInitialStartup: true });
-    assertEqual(
-        session.get_uint('idle-delay'),
-        480,
-        'startup in same state preserves intervening post-crash external edit'
-    );
+    assertEqual(session.get_uint('idle-delay'), 480, 'startup preserves intervening post-crash edit');
 
-    // Explicit edit in Preferences (forceIdleDelay=true) re-claims ownership
     idle2.applyForState('low-battery', sampleConfigs, { forceIdleDelay: true });
     assertEqual(session.get_uint('idle-delay'), 60, 'explicit prefs edit re-claims idle-delay');
     idle2.destroy();
 })();
 
-// 4. Regression: Single source of truth for recovery baseline when Preferences edits
-//    Battery timeout during an active Low Battery override.
+// 6. Single-source-of-truth baseline update from Preferences during Low Battery
 (() => {
     const ext = makeDefaultExtSettings();
     const power = makeFakeSettings({
@@ -207,16 +251,9 @@ const sampleConfigs = {
     const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
 
-    // Preferences updates the persisted recovery baseline directly (even if battery-idle-timeout unchanged)
     ext.set_int('recovery-low-bat-baseline-timeout', 2400);
-
-    // Leaving Low Battery restores 2400 from the single persisted baseline (not stale RAM 1800!)
     idle.applyForState('ac', sampleConfigs, { stateChanged: true });
-    assertEqual(
-        power.get_int('sleep-inactive-battery-timeout'),
-        2400,
-        'leaving Low Battery restores live persisted baseline 2400'
-    );
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 2400, 'restores live baseline 2400');
     idle.destroy();
 })();
 

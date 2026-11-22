@@ -2,12 +2,14 @@
 // Regression tests for LidController & ProfileController:
 //   1. Boxed GLib.Variant('b', false) close -> open -> close transitions
 //   2. UPower.LidIsClosed feed (systemd <= 255 compatibility) + deduplication
-//   3. cancelGraceTimer() invalidating an in-flight async monitor query (AC reconnect race)
-//   4. Sequence-stamped monitor refresh: rapid undock -> redock discards stale reply
-//   5. Fast user switching clears _wantInhibitor & _wantSleepDelay and releases FDs
-//   6. _preparingForSleep state machine (no mid-sleep FD re-acquire; fast resume safe)
-//   7. systemd-logind restart discards stale streams and notifies onLoginOwnerChanged
-//   8. ProfileController: dual-bus late arrival, ActiveProfileHolds, confirmed notify, lap-detected
+//   3. Superseded monitor query awaits the latest query (never suspends docked laptop!)
+//   4. cancelGraceTimer() invalidating an in-flight async monitor query (AC reconnect race)
+//   5. Unresolved session starts inactive; rejects FD acquisition until Active === true
+//   6. logind restart while old Inhibit() is in flight allows new owner + ignores stale error
+//   7. scheduleGraceAction queued during async FD acquisition runs once FD lands
+//   8. _preparingForSleep state machine (no mid-sleep reacquire; fast resume safe)
+//   9. ProfileController: serialized overlapping writes never trigger false manual override,
+//      async D-Bus rejection clears expected echo, dual-bus late arrival, ActiveProfileHolds
 
 import GLib from 'gi://GLib';
 
@@ -35,7 +37,7 @@ function makePropsChangedVariant(entries) {
 
 function drainMicrotasks() {
     const ctx = GLib.MainContext.default();
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 15; i++) {
         while (ctx.pending())
             ctx.iteration(false);
     }
@@ -79,6 +81,7 @@ function makeFakeLoginProxy() {
     });
     const fakeLogin = makeFakeLoginProxy();
     lid._loginProxy = fakeLogin;
+    lid._sessionActive = true;
     lid._inhibitorStream = { close() {} };
     lid._refreshExternalMonitorState = () => Promise.resolve();
     lid._loginPropId = fakeLogin.connect('g-properties-changed', (_p, changed) => {
@@ -98,7 +101,6 @@ function makeFakeLoginProxy() {
     drainMicrotasks();
     assertEqual(closeEvents, 2, 'close -> open -> close fires onLidCloseRequested twice');
 
-    // Immediate reopen cancels in-flight close
     fakeLogin.emitProps({ LidClosed: new GLib.Variant('b', false) });
     fakeLogin.emitProps({ LidClosed: new GLib.Variant('b', true) });
     fakeLogin.emitProps({ LidClosed: new GLib.Variant('b', false) });
@@ -116,6 +118,7 @@ function makeFakeLoginProxy() {
             closeEvents++;
         },
     });
+    lid._sessionActive = true;
     lid._inhibitorStream = { close() {} };
     lid._refreshExternalMonitorState = () => Promise.resolve();
 
@@ -128,16 +131,71 @@ function makeFakeLoginProxy() {
     lid.notifyLidClosed(true);
     drainMicrotasks();
     assertEqual(closeEvents, 2, 'UPower open -> close triggers second event cleanly');
-
     lid.destroy();
 })();
 
-// 3. Regression: cancelGraceTimer() invalidates an IN-FLIGHT async monitor refresh
+// 3. Regression: Superseded monitor query MUST await the newer query before firing
+//    lid-close callback (fixes docked laptop falsely seeing externalMonitorConnected=false!)
+(() => {
+    let observedDockedOnClose = null;
+    const pendingQueries = [];
+
+    const lid = new LidController({
+        onLidCloseRequested: () => {
+            observedDockedOnClose = lid.externalMonitorConnected;
+        },
+    });
+    lid._sessionActive = true;
+    lid._inhibitorStream = { close() {} };
+    lid._externalMonitorConnected = false; // Initial stale state before dock detected
+    lid._displayProxy = {
+        GetCurrentStateRemote(cb) {
+            pendingQueries.push(cb);
+        },
+    };
+
+    // Lid closes -> starts Query #1
+    lid.notifyLidClosed(true);
+    // MonitorsChanged arrives while Query #1 is still in flight -> starts Query #2
+    lid._refreshExternalMonitorState(true);
+
+    const dockedResult = [
+        2,
+        [
+            [['eDP-1'], [], { 'is-builtin': new GLib.Variant('b', true) }],
+            [['DP-1'], [], { 'is-builtin': new GLib.Variant('b', false) }],
+        ],
+        [],
+        {},
+    ];
+
+    // Query #1 finishes FIRST (superseded) -> MUST NOT fire lid callback yet!
+    pendingQueries[0](dockedResult, null);
+    drainMicrotasks();
+    assertEqual(
+        observedDockedOnClose,
+        null,
+        'superseded monitor query waits for latest query instead of firing early with stale false'
+    );
+
+    // Query #2 finishes -> updates externalMonitorConnected=true AND unblocks lid callback!
+    pendingQueries[1](dockedResult, null);
+    drainMicrotasks();
+    assertEqual(
+        observedDockedOnClose,
+        true,
+        'lid-close callback observes externalMonitorConnected=true from latest query'
+    );
+    lid.destroy();
+})();
+
+// 4. Regression: cancelGraceTimer() invalidates an IN-FLIGHT async monitor refresh
 (() => {
     let graceCallbackFired = false;
     let resolveMonitorQuery = null;
 
     const lid = new LidController({});
+    lid._sessionActive = true;
     lid._inhibitorStream = { close() {} };
     lid._lidClosed = true;
     lid._refreshExternalMonitorState = () =>
@@ -156,218 +214,191 @@ function makeFakeLoginProxy() {
     lid.destroy();
 })();
 
-// 4. Regression: Sequence-stamped monitor refresh discards out-of-order stale replies
-//    and never loses a rapid undock -> redock transition
+// 5. Regression: Fresh LidController starts sessionActive=false and refuses FD acquisition
 (() => {
-    const transitions = [];
-    const pendingCallbacks = [];
+    let transportCalls = 0;
     const lid = new LidController({
-        onExternalMonitorChanged: (wasConnected, isConnected) => {
-            transitions.push([wasConnected, isConnected]);
+        inhibitTransport: () => {
+            transportCalls++;
         },
     });
-    lid._externalMonitorConnected = true;
-    lid._displayProxy = {
-        GetCurrentStateRemote(cb) {
-            pendingCallbacks.push(cb);
-        },
-    };
-
-    // Query #1 (undocked -> false) and Query #2 (redocked -> true) overlap in flight
-    lid._refreshExternalMonitorState(true);
-    lid._refreshExternalMonitorState(true);
-
-    // Query #2 resolves FIRST (external display present -> true)
-    pendingCallbacks[1](
-        [
-            2,
-            [
-                [['eDP-1'], [], { 'is-builtin': new GLib.Variant('b', true) }],
-                [['DP-1'], [], { 'is-builtin': new GLib.Variant('b', false) }],
-            ],
-            [],
-            {},
-        ],
-        null
-    );
-    // Stale Query #1 resolves SECOND (only built-in panel -> false) — MUST BE IGNORED
-    pendingCallbacks[0](
-        [1, [[['eDP-1'], [], { 'is-builtin': new GLib.Variant('b', true) }]], [], {}],
-        null
-    );
-    drainMicrotasks();
-
-    assertEqual(lid.externalMonitorConnected, true, 'stale undock reply discarded; stays connected');
-    assertEqual(transitions.length, 0, 'no spurious undock callback fired');
-
-    // Now a genuine undock query #3 arrives
-    lid._refreshExternalMonitorState(true);
-    pendingCallbacks[2](
-        [3, [[['eDP-1'], [], { 'is-builtin': new GLib.Variant('b', true) }]], [], {}],
-        null
-    );
-    drainMicrotasks();
-    assertEqual(lid.externalMonitorConnected, false, 'genuine undock updates to false');
-    assertEqual(transitions.length, 1, 'genuine undock emits callback once');
-    assertEqual(transitions[0][0], true, 'previous state was true');
-    assertEqual(transitions[0][1], false, 'next state is false');
+    assertEqual(lid.sessionActive, false, 'unresolved session starts inactive');
+    lid.setInhibitDesired(true, 'Test');
+    assertEqual(transportCalls, 0, 'refuses FD acquisition before session Active===true');
     lid.destroy();
 })();
 
-// 5. Regression: fast user switch (Active -> false) clears _wantInhibitor & _wantSleepDelay,
-//    releases existing streams, and ignores lid events while inactive
+// 6. Regression: logind restart while old Inhibit() is pending allows new owner immediately,
+//    closes stale old FD, and ignores stale old error!
 (() => {
-    let lidFdClosed = false;
-    let sleepFdClosed = false;
-    let closeEvents = 0;
+    const requests = [];
+    let errorCount = 0;
+
     const lid = new LidController({
-        onLidCloseRequested: () => {
-            closeEvents++;
+        onError: () => {
+            errorCount++;
+        },
+        inhibitTransport: (req, done) => {
+            requests.push({ req, done });
         },
     });
-    lid._wantInhibitor = true;
-    lid._wantSleepDelay = true;
-    lid._inhibitorStream = {
-        close() {
-            lidFdClosed = true;
+    lid._loginProxy = { g_name_owner: ':1.10', disconnect() {}, disconnectSignal() {} };
+    lid._sessionActive = true;
+
+    // Owner #1 starts Inhibit (still pending)
+    lid.setInhibitDesired(true, 'Battery suspend');
+    assertEqual(requests.length, 1, 'owner 1 started inhibit');
+
+    // logind restarts -> new owner :1.20 arrives while owner 1 request is STILL pending
+    lid._loginProxy.g_name_owner = ':1.20';
+    lid._handleLoginOwnerChanged();
+    lid._sessionActive = true; // Simulate canonical session re-verified
+
+    // Owner #2 MUST be able to start a fresh Inhibit immediately!
+    lid.setInhibitDesired(true, 'Battery suspend');
+    assertEqual(requests.length, 2, 'owner 2 acquires immediately despite stale owner 1 in flight');
+
+    // Late error from dead owner #1 MUST NOT suppress or notify error
+    requests[0].done(null, new Error('Name disappeared'));
+    assertEqual(errorCount, 0, 'stale error from dead owner ignored');
+
+    // Owner #2 succeeds -> FD installed!
+    const newStream = { close() {} };
+    requests[1].done(newStream, null);
+    assertEqual(lid.isInhibiting, true, 'owner 2 FD installed cleanly');
+    lid.destroy();
+})();
+
+// 7. Regression: scheduleGraceAction while FD acquisition is in flight runs once FD lands
+(() => {
+    let pendingFdDone = null;
+    let graceFired = false;
+
+    const lid = new LidController({
+        inhibitTransport: (_req, done) => {
+            pendingFdDone = done;
         },
-    };
-    lid._sleepDelayStream = {
-        close() {
-            sleepFdClosed = true;
-        },
-    };
+    });
+    lid._sessionActive = true;
+    lid._lidClosed = true;
     lid._refreshExternalMonitorState = () => Promise.resolve();
 
-    lid._handleSessionActiveChanged(false);
-    assertEqual(lid._wantInhibitor, false, 'deactivation clears _wantInhibitor (blocks in-flight FD)');
-    assertEqual(lid._wantSleepDelay, false, 'deactivation clears _wantSleepDelay');
-    assertEqual(lidFdClosed, true, 'inactive session releases handle-lid-switch FD');
-    assertEqual(sleepFdClosed, true, 'inactive session releases sleep delay FD');
+    // Start async FD acquisition and immediately schedule closed-lid grace action
+    lid.setInhibitDesired(true, 'Battery lock');
+    lid.scheduleGraceAction(0, 'battery', () => {
+        graceFired = true;
+    });
+    assertEqual(graceFired, false, 'waits until FD arrives');
 
-    lid.notifyLidClosed(true);
+    // Now FD arrives -> queued grace action executes immediately!
+    pendingFdDone({ close() {} }, null);
     drainMicrotasks();
-    assertEqual(closeEvents, 0, 'inactive session ignores lid close events');
+    assertEqual(graceFired, true, 'queued grace action runs as soon as FD is installed');
     lid.destroy();
 })();
 
-// 6. Regression: _preparingForSleep prevents mid-sleep delay FD reacquisition and
-//    prevents stale resume race
+// 8. Regression: _preparingForSleep state machine
 (() => {
     let acquireAttempts = 0;
     const lid = new LidController({
         shouldPauseMediaOnSleep: () => false,
+        inhibitTransport: () => {
+            acquireAttempts++;
+        },
     });
+    lid._sessionActive = true;
     lid._wantSleepDelay = true;
     lid._sleepDelayStream = { close() {} };
-    lid._acquireInhibitor = () => {
-        acquireAttempts++;
-    };
 
-    // Enter PrepareForSleep(true) -> releases delay FD and sets _preparingForSleep=true
     lid._handlePrepareForSleep(true);
     assertEqual(lid._preparingForSleep, true, 'preparingForSleep set true');
     assertEqual(lid._sleepDelayStream, null, 'delay FD released for sleep');
 
-    // A reconciliation mid-sleep must NOT reacquire a delay FD while preparing
     lid.setSleepDelayDesired(true);
     assertEqual(acquireAttempts, 0, 'does not reacquire delay FD mid-PrepareForSleep');
 
-    // Resume (PrepareForSleep(false)) clears _preparingForSleep and reacquires
     lid._handlePrepareForSleep(false);
     assertEqual(lid._preparingForSleep, false, 'preparingForSleep cleared on resume');
     assertEqual(acquireAttempts, 1, 'reacquires delay FD on resume');
     lid.destroy();
 })();
 
-// 7. Regression: systemd-logind restart discards stale FDs and notifies owner change
+// 9. Regression: ProfileController serialized writes never mistake own AC->Battery echo
+//    for a manual Quick Settings edit, and rejected async writes clear pending state!
 (() => {
-    let lidClosed = false;
-    let ownerNotified = null;
-    const lid = new LidController({
-        onLoginOwnerChanged: connected => {
-            ownerNotified = connected;
-        },
-    });
-    lid._loginProxy = { g_name_owner: null, disconnect() {}, disconnectSignal() {} };
-    lid._inhibitorStream = {
-        close() {
-            lidClosed = true;
-        },
-    };
+    let externalChanges = 0;
+    const applied = [];
+    const dbusCalls = [];
 
-    lid._handleLoginOwnerChanged();
-    assertEqual(lidClosed, true, 'login1 loss discards stale inhibitor FD');
-    assertEqual(lid._inhibitorStream, null, 'inhibitor stream cleared');
-    assertEqual(ownerNotified, false, 'notifies login1 disconnected');
-    lid.destroy();
-})();
-
-// 8. Regression: ProfileController dual-bus late arrival, ActiveProfileHolds,
-//    confirmed notifications, and lap-detected Variant
-(() => {
-    let appliedProfile = null;
-    let appliedLabel = null;
     const prof = new ProfileController({
-        onExternalProfileChange: () => {},
+        onExternalProfileChange: () => {
+            externalChanges++;
+        },
         onProfileApplied: (p, label) => {
-            appliedProfile = p;
-            appliedLabel = label;
+            applied.push([p, label]);
         },
         onLapRetry: () => {},
+        dbusCall: (_entry, profile, done) => {
+            dbusCalls.push({ profile, done });
+        },
     });
 
-    // Simulate modern bus absent, legacy bus present
-    const modernEntry = {
-        proxy: { g_name_owner: null, disconnect() {} },
-        propChangedId: null,
-        ownerChangedId: null,
-    };
-    const legacyEntry = {
+    const entry = {
+        busName: 'org.freedesktop.UPower.PowerProfiles',
+        objectPath: '/org/freedesktop/UPower/PowerProfiles',
+        interfaceName: 'org.freedesktop.UPower.PowerProfiles',
         proxy: {
             g_name_owner: ':1.9',
             ActiveProfile: 'balanced',
-            PerformanceDegraded: 'lap-detected',
             Profiles: [
                 { Profile: new GLib.Variant('s', 'balanced') },
                 { Profile: new GLib.Variant('s', 'performance') },
+                { Profile: new GLib.Variant('s', 'power-saver') },
             ],
-            ActiveProfileHolds: [
-                { ApplicationId: new GLib.Variant('s', 'com.feralinteractive.GameMode') },
-            ],
+            ActiveProfileHolds: [],
             disconnect() {},
         },
         propChangedId: null,
         ownerChangedId: null,
     };
-    prof._candidates = [modernEntry, legacyEntry];
+    prof._candidates = [entry];
     prof._selectActiveEntry();
 
-    assertEqual(prof.isAvailable, true, 'selects legacy PPD proxy when modern bus is absent');
-    assertEqual(prof.hasExternalApplicationHold(), true, 'detects external app hold');
-
-    legacyEntry.proxy.ActiveProfileHolds = [
-        { ApplicationId: new GLib.Variant('s', 'org.gnome.SettingsDaemon.Power') },
-    ];
-    assertEqual(prof.hasExternalApplicationHold(), false, 'ignores GSD low-battery hold');
-
+    // Rapid AC -> Battery: request 'performance', then before it completes request 'balanced'
     prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
-    assertEqual(appliedProfile, null, 'does not notify prematurely before D-Bus confirmation');
+    prof.setProfile('balanced', { notifyStateLabel: 'On Battery' });
+    assertEqual(dbusCalls.length, 1, 'second write serialized behind in-flight first write');
 
+    // First write completes and emits ActiveProfile='performance'
+    entry.proxy.ActiveProfile = 'performance';
     prof._handlePropertiesChanged(
-        makePropsChangedVariant({
-            ActiveProfile: new GLib.Variant('s', 'performance'),
-        })
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'performance') })
     );
-    assertEqual(appliedProfile, 'performance', 'notifies after backend confirmation');
-    assertEqual(appliedLabel, 'Plugged In', 'passes transition label on confirmation');
+    dbusCalls[0].done(null);
 
+    assertEqual(externalChanges, 0, 'first echo NEVER misclassified as manual Quick Settings change');
+    assertEqual(applied.length, 0, 'superseded performance transition not notified');
+    assertEqual(dbusCalls.length, 2, 'queued balanced write dispatched automatically');
+    assertEqual(dbusCalls[1].profile, 'balanced', 'second write targets balanced');
+
+    // Second write completes and confirms 'balanced'
+    entry.proxy.ActiveProfile = 'balanced';
     prof._handlePropertiesChanged(
-        makePropsChangedVariant({
-            PerformanceDegraded: new GLib.Variant('s', 'lap-detected'),
-        })
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'balanced') })
     );
-    assertEqual(prof._lapDebounceId !== null, true, 'lap-detected boxed Variant schedules retry timer');
+    dbusCalls[1].done(null);
+    assertEqual(externalChanges, 0, 'still zero false manual overrides');
+    assertEqual(applied.length, 1, 'final confirmed profile notified once');
+    assertEqual(applied[0][0], 'balanced', 'confirmed profile is balanced');
+
+    // Rejected async write clears expected echo so later external change IS detected
+    prof.setProfile('power-saver', { notifyStateLabel: 'Low Battery' });
+    dbusCalls[2].done(new Error('Polkit denied'));
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'power-saver') })
+    );
+    assertEqual(externalChanges, 1, 'rejected write cleared expected echo; later external change detected');
+
     prof.destroy();
 })();
 

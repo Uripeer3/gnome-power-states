@@ -233,7 +233,7 @@
       <description>Display transient GNOME notifications when Power States switches modes or encounters a backend issue.</description>
     </key>
 
-    <!-- Internal crash-recovery journal keys (not shown in Preferences) -->
+    <!-- Internal crash-recovery WAL journal keys (not shown in Preferences) -->
     <key name="recovery-idle-delay-active" type="b">
       <default>false</default>
       <summary>Internal: whether Power States holds a recoverable idle-delay override</summary>
@@ -246,7 +246,17 @@
 
     <key name="recovery-idle-delay-applied" type="u">
       <default>300</default>
-      <summary>Internal: last idle-delay value written by extension (for ownership check)</summary>
+      <summary>Internal: last confirmed idle-delay value written by extension</summary>
+    </key>
+
+    <key name="recovery-idle-delay-pending" type="i">
+      <default>-1</default>
+      <summary>Internal: in-flight idle-delay write target (-1 when no write is pending)</summary>
+    </key>
+
+    <key name="recovery-low-bat-active" type="b">
+      <default>false</default>
+      <summary>Internal (legacy migration): pre-per-key Low Battery recovery flag</summary>
     </key>
 
     <key name="recovery-low-bat-type-active" type="b">
@@ -271,12 +281,22 @@
 
     <key name="recovery-low-bat-applied-type" type="s">
       <default>''</default>
-      <summary>Internal: last Low Battery sleep-inactive-battery-type written by extension</summary>
+      <summary>Internal: last confirmed Low Battery sleep-inactive-battery-type written by extension</summary>
     </key>
 
     <key name="recovery-low-bat-applied-timeout" type="i">
       <default>300</default>
-      <summary>Internal: last Low Battery sleep-inactive-battery-timeout written by extension</summary>
+      <summary>Internal: last confirmed Low Battery sleep-inactive-battery-timeout written by extension</summary>
+    </key>
+
+    <key name="recovery-low-bat-pending-type" type="s">
+      <default>''</default>
+      <summary>Internal: in-flight Low Battery sleep-inactive-battery-type target (empty when none)</summary>
+    </key>
+
+    <key name="recovery-low-bat-pending-timeout" type="i">
+      <default>-1</default>
+      <summary>Internal: in-flight Low Battery sleep-inactive-battery-timeout target (-1 when none)</summary>
     </key>
   </schema>
 </schemalist>

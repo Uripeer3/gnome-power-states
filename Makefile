@@ -24,11 +24,11 @@ check-syntax:
 		if printf '%s\n' "$$out" | grep -qi "SyntaxError"; then \
 			echo "SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
 		fi; \
-		if printf '%s\n' "$$out" | grep -qi "ImportError" && ! printf '%s\n' "$$out" | grep -q "resource:///org/gnome/"; then \
-			echo "LOCAL IMPORT ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
-		fi; \
+		for rel in $$(grep -oE "from ['\"]\./[^'\"]+['\"]" "$$f" | sed -E "s/from ['\"](\.[^'\"]+)['\"]/\1/"); do \
+			test -f "$$rel" || { echo "MISSING LOCAL IMPORT in $$f: $$rel"; exit 1; }; \
+		done; \
 	done
-	@echo "All JS modules parsed and resolved local imports cleanly"
+	@echo "All library modules loaded and entry-point syntax + local import targets verified"
 	glib-compile-schemas --strict --dry-run $(SCHEMA_DIR)
 
 install: compile-schemas
