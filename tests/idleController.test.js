@@ -93,6 +93,7 @@ function makeDefaultExtSettings() {
         'recovery-idle-delay-baseline': 300,
         'recovery-idle-delay-applied': 300,
         'recovery-idle-delay-pending': -1,
+        'recovery-idle-delay-relinquished-state': '',
         'recovery-low-bat-active': false,
         'recovery-low-bat-type-active': false,
         'recovery-low-bat-timeout-active': false,
@@ -102,6 +103,8 @@ function makeDefaultExtSettings() {
         'recovery-low-bat-applied-timeout': 300,
         'recovery-low-bat-pending-type': '',
         'recovery-low-bat-pending-timeout': -1,
+        'recovery-low-bat-type-relinquished': false,
+        'recovery-low-bat-timeout-relinquished': false,
     });
 }
 
@@ -220,6 +223,78 @@ const sampleConfigs = {
     );
     idle.destroy();
     assertEqual(session.get_uint('idle-delay'), 600, 'idle-delay stays 600 after destroy');
+})();
+
+// 3c. Regression: Rejected journal COMMIT (`applied` key locked) preserves `pending` so
+//     destroy() still restores original 600 instead of leaving 60 stranded!
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 300, 'first override applied 300');
+
+    // Lock the `applied` journal key before transitioning to Low Battery (60)
+    ext.setWritable('recovery-idle-delay-applied', false);
+    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 60, 'second override applied 60');
+    assertEqual(ext.get_int('recovery-idle-delay-pending'), 60, 'pending kept when applied write rejected');
+
+    idle.destroy();
+    assertEqual(session.get_uint('idle-delay'), 600, 'destroy still restores original 600 via pending');
+})();
+
+// 3d. Regression: Legacy migration with unwritable replacement flag retains legacy marker & restores!
+(() => {
+    const ext = makeDefaultExtSettings();
+    ext.set_boolean('recovery-low-bat-active', true);
+    ext.set_string('recovery-low-bat-baseline-type', 'nothing');
+    ext.set_int('recovery-low-bat-baseline-timeout', 1800);
+    ext.set_string('recovery-low-bat-applied-type', 'suspend');
+    ext.set_int('recovery-low-bat-applied-timeout', 300);
+    ext.setWritable('recovery-low-bat-type-active', false);
+
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 300,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    assertEqual(ext.get_boolean('recovery-low-bat-active'), true, 'legacy marker retained when transfer fails');
+
+    idle.destroy();
+    assertEqual(power.get_string('sleep-inactive-battery-type'), 'nothing', 'in-memory fallback still restores type');
+    assertEqual(ext.get_boolean('recovery-low-bat-active'), false, 'legacy marker cleared once restored');
+})();
+
+// 3e. Regression: User edit while extension is running survives same-state disable + re-enable!
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle1 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle1.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 300, 'battery applied 300');
+
+    // User externally edits idle-delay to 480 while running on Battery
+    session.set_uint('idle-delay', 480);
+
+    // Disable and re-enable WITHOUT changing power state -> MUST preserve 480!
+    idle1.destroy();
+    const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle2.applyForState('battery', sampleConfigs, { isInitialStartup: true });
+    assertEqual(session.get_uint('idle-delay'), 480, 'same-state disable/enable preserves user edit 480');
+    idle2.destroy();
 })();
 
 // 4. Regression: Failed restore on temporarily unwritable key preserves journal for retry

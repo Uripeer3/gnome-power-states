@@ -254,6 +254,11 @@
       <summary>Internal: in-flight idle-delay write target (-1 when no write is pending)</summary>
     </key>
 
+    <key name="recovery-idle-delay-relinquished-state" type="s">
+      <default>''</default>
+      <summary>Internal: power state in which an external GNOME Settings idle-delay edit took ownership</summary>
+    </key>
+
     <key name="recovery-low-bat-active" type="b">
       <default>false</default>
       <summary>Internal (legacy migration): pre-per-key Low Battery recovery flag</summary>
@@ -297,6 +302,16 @@
     <key name="recovery-low-bat-pending-timeout" type="i">
       <default>-1</default>
       <summary>Internal: in-flight Low Battery sleep-inactive-battery-timeout target (-1 when none)</summary>
+    </key>
+
+    <key name="recovery-low-bat-type-relinquished" type="b">
+      <default>false</default>
+      <summary>Internal: whether an external edit took ownership of sleep-inactive-battery-type while in Low Battery</summary>
+    </key>
+
+    <key name="recovery-low-bat-timeout-relinquished" type="b">
+      <default>false</default>
+      <summary>Internal: whether an external edit took ownership of sleep-inactive-battery-timeout while in Low Battery</summary>
     </key>
   </schema>
 </schemalist>

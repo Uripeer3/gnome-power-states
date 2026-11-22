@@ -243,12 +243,55 @@ function makeFakeLoginProxy() {
     assertEqual(lidFdClosed, true, 'fast switch closes lid FD');
     assertEqual(sleepFdClosed, true, 'fast switch closes sleep-delay FD');
 
-    // Failed canonical session resolution returns null (never falls back to /session/auto)
-    lid._loginProxy = { g_name_owner: ':1.1', disconnect() {}, disconnectSignal() {} };
-    lid._resolveCanonicalSessionPath = () => Promise.resolve(null);
-    lid._attachCanonicalSessionProxy();
+    // Failed canonical session resolution through the REAL _resolveCanonicalSessionPath()
+    // when all 3 lookups fail or return non-canonical '/session/auto' must return null
+    // and leave _sessionProxy === null & sessionActive === false (fail-closed, zero FDs).
+    const lidFail = new LidController({
+        inhibitTransport: () => {
+            transportCalls++;
+        },
+        userDisplayLookup: async () => ['', '/org/freedesktop/login1/session/auto'],
+    });
+    lidFail._loginProxy = {
+        g_name_owner: ':1.1',
+        GetSessionRemote(_id, cb) { cb(['/org/freedesktop/login1/session/auto'], null); },
+        GetSessionByPIDRemote(_pid, cb) { cb(null, new Error('No session for PID')); },
+        disconnect() {},
+        disconnectSignal() {},
+    };
+    let resolvedFail = 'unset';
+    lidFail._resolveCanonicalSessionPath().then(p => {
+        resolvedFail = p;
+    });
     drainMicrotasks();
-    assertEqual(lid.sessionActive, false, 'failed canonical lookup stays fail-closed inactive');
+    assertEqual(resolvedFail, null, 'real resolver rejects /session/auto and returns null');
+
+    lidFail._attachCanonicalSessionProxy();
+    drainMicrotasks();
+    assertEqual(lidFail._sessionProxy, null, 'failed attach leaves _sessionProxy null');
+    assertEqual(lidFail.sessionActive, false, 'failed attach stays inactive');
+    lidFail.setInhibitDesired(true, 'Should stay blocked');
+    assertEqual(transportCalls, 0, 'failed attach refuses FD acquisition');
+    lidFail.destroy();
+
+    // Also test executeAction gating (missing FD, open lid, stale generation, valid)
+    const fakeLogin = makeFakeLoginProxy();
+    lid._loginProxy = fakeLogin;
+    lid._sessionActive = true;
+    lid._lidClosed = true;
+    lid.executeAction('suspend');
+    assertEqual(fakeLogin.suspendCalls, 0, 'executeAction blocked when FD missing');
+    lid._inhibitorStream = { close() {} };
+    lid._lidClosed = false;
+    lid.executeAction('suspend');
+    assertEqual(fakeLogin.suspendCalls, 0, 'executeAction blocked when lid open');
+    lid._lidClosed = true;
+    const curGen = lid._actionGeneration;
+    lid.executeAction('suspend', { expectedGeneration: curGen - 1 });
+    assertEqual(fakeLogin.suspendCalls, 0, 'executeAction blocked on stale generation');
+    lid.executeAction('suspend', { expectedGeneration: curGen });
+    assertEqual(fakeLogin.suspendCalls, 1, 'executeAction runs when FD held, active, closed, and gen matches');
+
     lid.destroy();
 })();
 
@@ -416,12 +459,16 @@ function makeFakeLoginProxy() {
     assertEqual(prof.hasExternalApplicationHold(), false, 'ignores GSD low-battery hold');
 
     // Rapid AC -> Battery through production resolveProfileTransition(effectiveProfile)!
-    // Start in balanced, AC requests performance (cache STILL balanced while in flight)
+    // Case A: Unplug AFTER successful PPD reply, BEFORE PropertiesChanged echo updates cache!
     prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
-    assertEqual(prof.effectiveProfile, 'performance', 'effectiveProfile reflects in-flight write');
+    dbusCalls[0].done(null); // Reply succeeded, cache STILL 'balanced'!
+    assertEqual(
+        prof.effectiveProfile,
+        'performance',
+        'effectiveProfile stays performance across reply-to-echo window'
+    );
 
-    // Unplug to Battery (target balanced) BEFORE PPD updates cached ActiveProfile!
-    const batDecision = resolveProfileTransition({
+    const batAfterReply = resolveProfileTransition({
         powerState: 'battery',
         lastPolicyState: 'ac',
         activeProfile: prof.effectiveProfile,
@@ -429,19 +476,37 @@ function makeFakeLoginProxy() {
         stateConfig: { powerProfile: 'balanced' },
         availableProfiles: prof.availableProfiles,
     });
-    assertEqual(batDecision.shouldApply, true, 'production policy DOES NOT drop balanced on rapid unplug');
-    prof.setProfile(batDecision.targetProfile, { notifyStateLabel: 'On Battery' });
-
-    // Reply-before-echo ordering: Performance D-Bus reply arrives BEFORE PropertiesChanged updates cache!
-    dbusCalls[0].done(null);
     assertEqual(
-        dbusCalls.length,
-        2,
-        'reply-before-echo STILL dispatches queued balanced write instead of discarding against stale cache'
+        batAfterReply.shouldApply,
+        true,
+        'production policy queues balanced even when unplug happens between reply and echo'
     );
-    assertEqual(dbusCalls[1].profile, 'balanced', 'queued write targets balanced');
+    prof.setProfile(batAfterReply.targetProfile, { notifyStateLabel: 'On Battery' });
+    assertEqual(dbusCalls.length, 2, 'second write dispatched immediately after first reply');
+    assertEqual(dbusCalls[1].profile, 'balanced', 'second write targets balanced');
 
-    // Both echoes arrive in sequence
+    // Performance echo arrives while balanced write is in flight -> MUST NOT emit stale AC notify!
+    legacyEntry.proxy.ActiveProfile = 'performance';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'performance') })
+    );
+    assertEqual(applied.length, 0, 'superseded AC echo does not emit notification while Battery write is in flight');
+
+    legacyEntry.proxy.ActiveProfile = 'balanced';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'balanced') })
+    );
+    dbusCalls[1].done(null);
+
+    assertEqual(externalChanges, 0, 'zero false manual Quick Settings overrides');
+    assertEqual(applied.length, 1, 'exactly one notification emitted for final confirmed profile');
+    assertEqual(applied[0][0], 'balanced', 'final confirmed profile is balanced');
+
+    // Case B: Unplug BEFORE reply + reply-before-echo ordering!
+    prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
+    prof.setProfile('balanced', { notifyStateLabel: 'On Battery' });
+    dbusCalls[2].done(null); // Reply arrives before echo
+    assertEqual(dbusCalls.length, 4, 'reply-before-echo dispatches queued balanced write');
     legacyEntry.proxy.ActiveProfile = 'performance';
     prof._handlePropertiesChanged(
         makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'performance') })
@@ -450,14 +515,13 @@ function makeFakeLoginProxy() {
     prof._handlePropertiesChanged(
         makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'balanced') })
     );
-    dbusCalls[1].done(null);
-
-    assertEqual(externalChanges, 0, 'zero false manual Quick Settings overrides');
-    assertEqual(applied[applied.length - 1][0], 'balanced', 'final confirmed profile is balanced');
+    dbusCalls[3].done(null);
+    assertEqual(externalChanges, 0, 'reply-before-echo produces zero false manual overrides');
+    assertEqual(applied.length, 2, 'superseded AC echo suppressed here too; only final Battery notified');
 
     // Rejected async write clears expected echo so later external change IS detected
     prof.setProfile('power-saver', { notifyStateLabel: 'Low Battery' });
-    dbusCalls[2].done(new Error('Polkit denied'));
+    dbusCalls[4].done(new Error('Polkit denied'));
     prof._handlePropertiesChanged(
         makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'power-saver') })
     );
