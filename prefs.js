@@ -712,9 +712,9 @@ class PrefsController {
     }
 
     /**
-     * Commit BOTH Automatic Suspend controls atomically by capturing both values
-     * before writing either key, then deferring the UI refresh to idle so GTK4
-     * finishes tearing down the Gtk.DropDown popover cleanly (prevents crashes).
+     * Commit an Automatic Suspend edit (`'action'`, `'timeout'`, or `'both'`) without
+     * clobbering the untouched field, then defer UI refresh to idle so GTK4 finishes
+     * tearing down the Gtk.DropDown popover cleanly (prevents crashes).
      */
     _commitIdleControls(editedField = 'both') {
         const stateKey = this._selectedState;

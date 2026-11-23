@@ -21,7 +21,7 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 ### Per-State Policies (`Plugged In` | `On Battery` | `Low Battery`)
 - **Power Mode**: Automatically switch between *Performance*, *Balanced*, *Power Saver*, or *Leave Unchanged* via `power-profiles-daemon` or `tuned-ppd`.
 - **When Laptop Lid Closes (Zero Root)**: Choose *Suspend*, *Do Nothing*, *Lock Screen*, *Turn Off Screen*, or *Hibernate* independently per power state using an unprivileged `systemd-logind` `handle-lid-switch` session inhibitor.
-- **Clamshell / External Monitor Awareness**: Each state includes an *"Even When an External Monitor Is Connected"* toggle (off by default, so closing the lid while docked stays awake unless you explicitly opt in).
+- **Clamshell / External Monitor Awareness**: Each state includes an *"Even With External Monitor Connected"* toggle (off by default, so closing the lid while docked stays awake unless you explicitly opt in).
 - **Automatic Suspend (Synced with GNOME Settings)**: Single compact row (`Action` + `Delay`) synced directly with GNOME's native `org.gnome.settings-daemon.plugins.power` keys (`sleep-inactive-ac-*` and `sleep-inactive-battery-*`), plus an optional temporary override while in *Low Battery* that restores cleanly on exit.
 - **Screen Blank Delay**: Per-state `org.gnome.desktop.session` `idle-delay` (optional; defaults to *Leave Unchanged* and restores your original baseline if the extension is disabled).
 
@@ -76,7 +76,7 @@ make pack
 ## Development & Testing
 
 ```bash
-# Compile GSettings schema and run pure policy-engine unit tests
+# Validate schema, check module imports/syntax, and run all GJS unit & regression tests
 make test
 
 # Uninstall cleanly
@@ -92,8 +92,12 @@ gnome-power-states/
 ├── metadata.json                # GNOME 45–51+, user + unlock-dialog session modes
 ├── extension.js                 # Thin lifecycle orchestrator (zero UI/Quick Settings edits)
 ├── prefs.js                     # Libadwaita single-page UI (scoped state bar + global guardrails)
+├── docs/
+│   └── architecture.md          # Active processes, D-Bus/Polkit flows, and upstream GNOME mapping
 ├── schemas/
 │   └── org.gnome.shell.extensions.power-states.gschema.xml
+├── scripts/
+│   └── check-imports.py         # Relative import & runtime module checker (excluded from pack ZIP)
 ├── lib/
 │   ├── policyEngine.js          # Pure, unit-tested state, transition, lid, and conflict logic
 │   ├── upowerWatcher.js         # DisplayDevice + ALL LINE_POWER devices + hotplug signals
@@ -102,11 +106,13 @@ gnome-power-states/
 │   ├── idleController.js        # Native gsd-power sync + idle-delay baseline snapshot/restore
 │   ├── mprisHelper.js           # Best-effort MPRIS Pause before lid sleep
 │   ├── capabilities.js          # Hardware & daemon capability prober
-│   ├── configStore.js           # Typed GSettings readers
+│   ├── configStore.js           # Typed GSettings readers & schema-safe fallbacks
 │   ├── dbusXml.js               # Self-contained D-Bus interface definitions
 │   └── upowerConfig.js          # Read-only /etc/UPower/UPower.conf parser
 └── tests/
-    └── policyEngine.test.js     # GJS unit tests
+    ├── policyEngine.test.js     # Pure policy-engine unit tests
+    ├── lidController.test.js    # Lid, undock, and controller regression tests
+    └── idleController.test.js   # Idle/auto-suspend recovery & baseline sync regression tests
 ```
 
 ---

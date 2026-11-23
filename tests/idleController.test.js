@@ -531,6 +531,35 @@ const sampleConfigs = {
     }
 })();
 
+// 14. Regression: Timeout-only Battery edit updates lowBatTimeout baseline even when
+//     battery-idle-action holds 'nothing' (e.g., after external native relinquishment).
+(() => {
+    const ext = makeFakeSettings({
+        'recovery-state': '{}',
+        'battery-idle-action': 'nothing',
+        'battery-idle-timeout': 900,
+    });
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 900,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    idle.syncExplicitNativeAutoSuspend(
+        'battery',
+        { idleAction: 'nothing', idleTimeout: 1800 },
+        'timeout'
+    );
+    idle.destroy();
+    assertEqual(
+        power.get_int('sleep-inactive-battery-timeout'),
+        1800,
+        'timeout-only edit updates lowBatTimeout baseline even when idleAction is nothing'
+    );
+})();
+
 if (failed > 0) {
     console.error(`\n${failed} test(s) failed, ${passed} passed.`);
     imports.system.exit(1);

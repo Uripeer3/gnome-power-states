@@ -347,6 +347,23 @@ test('detectPolicyConflicts: flags blank >= suspend and battery lid nothing', ()
     const codes = conflicts.map(c => c.code);
     assertEqual(codes.includes('blank-after-suspend'), true, 'flags blank-after-suspend');
     assertEqual(codes.includes('battery-lid-nothing'), true, 'flags battery-lid-nothing');
+
+    const subMinute = detectPolicyConflicts(
+        'ac',
+        {
+            lidAction: 'suspend',
+            idleAction: 'suspend',
+            idleTimeout: 30,
+            screenBlank: 60,
+        },
+        { sleepMode: 'suspend' },
+        { canHibernate: true }
+    );
+    assertEqual(
+        subMinute[0]?.message.includes('30 s'),
+        true,
+        'sub-minute Automatic Suspend duration formats in seconds instead of 0/1 min'
+    );
 });
 
 if (failed > 0) {

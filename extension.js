@@ -657,8 +657,7 @@ export default class PowerStatesExtension extends Extension {
         const stateMatches =
             expectedState === null ||
             currentState === expectedState ||
-            ((expectedState === 'battery' || expectedState === 'low-battery') &&
-                (currentState === 'battery' || currentState === 'low-battery'));
+            (isBatteryState(expectedState) && isBatteryState(currentState));
         if (!stateMatches)
             return;
 
