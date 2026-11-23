@@ -755,9 +755,32 @@ class PrefsController {
                     this._gnomePowerSettings.set_int(timeoutKey, timeoutValue);
 
                 if (actionId === 'nothing' || actionId === 'suspend' || actionId === 'hibernate') {
-                    this._settings.set_string(`${stateKey}-idle-action`, actionId);
-                    if (delayActive)
-                        this._settings.set_int(`${stateKey}-idle-timeout`, timeoutValue);
+                    const extActionKey = `${stateKey}-idle-action`;
+                    // If Low Battery currently owns the native key and the extension key
+                    // already holds `actionId` (e.g. native was edited to a non-enum value
+                    // like 'blank'), nudge through another enum value so GSettings emits
+                    // `changed` and extension.js updates recovery-state's baseline.
+                    if (lowBatTypeOwned && this._settings.get_string(extActionKey) === actionId) {
+                        this._settings.set_string(
+                            extActionKey,
+                            actionId === 'nothing' ? 'suspend' : 'nothing'
+                        );
+                    }
+                    this._settings.set_string(extActionKey, actionId);
+
+                    if (delayActive) {
+                        const extTimeoutKey = `${stateKey}-idle-timeout`;
+                        if (
+                            lowBatTimeoutOwned &&
+                            this._settings.get_int(extTimeoutKey) === timeoutValue
+                        ) {
+                            this._settings.set_int(
+                                extTimeoutKey,
+                                timeoutValue > 60 ? timeoutValue - 1 : timeoutValue + 1
+                            );
+                        }
+                        this._settings.set_int(extTimeoutKey, timeoutValue);
+                    }
                 }
             } else {
                 this._settings.set_string('low-battery-idle-action', actionId);

@@ -407,6 +407,91 @@ const sampleConfigs = {
     assertEqual(session.get_uint('idle-delay'), 600, 'native idle-delay stays untouched at 600');
 })();
 
+// 11. Regression: Crash-recovered Low Battery relinquishment binds `{ configured }` on first
+//     startup so a subsequent offline Preferences edit takes effect on next enable!
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle1 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle1.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 300, 'low-battery applied 300');
+
+    // Crash, externally edit native timeout to 450, restart in Low Battery -> preserves 450
+    power.simulateProcessCrash();
+    session.simulateProcessCrash();
+    power.set_int('sleep-inactive-battery-timeout', 450);
+
+    const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle2.applyForState('low-battery', sampleConfigs, { isInitialStartup: true });
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 450, 'startup preserves post-crash 450');
+    assertEqual(
+        readRecoveryState(ext).lowBatTimeoutRelinquished?.configured,
+        300,
+        'startup bound crash-recovered timeout relinquishment to configured 300'
+    );
+    idle2.destroy();
+
+    // Offline edit selects 900s for Low Battery -> re-enabling on Low Battery applies 900!
+    const updatedConfigs = {
+        ...sampleConfigs,
+        'low-battery': { ...sampleConfigs['low-battery'], idleTimeout: 900 },
+    };
+    const idle3 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle3.applyForState('low-battery', updatedConfigs, { isInitialStartup: true });
+    assertEqual(
+        power.get_int('sleep-inactive-battery-timeout'),
+        900,
+        'offline Low Battery timeout edit applies after crash-recovered relinquishment'
+    );
+    idle3.destroy();
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 450, 'restores 450 baseline on disable');
+})();
+
+// 12. Regression: Entering Low Battery syncs captured baseline to battery-idle-action so
+//     re-selecting the previous value in Preferences triggers changed and updates baseline!
+(() => {
+    const ext = makeFakeSettings({
+        'recovery-state': '{}',
+        'battery-idle-action': 'suspend',
+        'battery-idle-timeout': 900,
+    });
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'nothing', // Changed externally in GNOME Settings
+        'sleep-inactive-battery-timeout': 900,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    assertEqual(
+        ext.get_string('battery-idle-action'),
+        'nothing',
+        'Low Battery baseline capture synced battery-idle-action to nothing'
+    );
+
+    // User re-selects 'suspend' in Preferences -> emits changed (nothing -> suspend)!
+    let changedFired = 0;
+    ext.connect('changed::battery-idle-action', () => {
+        changedFired++;
+        idle.syncExplicitNativeAutoSuspend('battery', {
+            idleAction: ext.get_string('battery-idle-action'),
+            idleTimeout: ext.get_int('battery-idle-timeout'),
+        });
+    });
+    ext.set_string('battery-idle-action', 'suspend');
+    assertEqual(changedFired, 1, 're-selecting suspend emitted changed signal');
+
+    // Leaving Low Battery restores the updated 'suspend' baseline!
+    idle.applyForState('ac', sampleConfigs, { stateChanged: true });
+    assertEqual(power.get_string('sleep-inactive-battery-type'), 'suspend', 'restored explicit suspend baseline');
+    idle.destroy();
+})();
+
 if (failed > 0) {
     console.error(`\n${failed} test(s) failed, ${passed} passed.`);
     imports.system.exit(1);

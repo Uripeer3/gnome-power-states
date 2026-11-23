@@ -315,7 +315,7 @@ export default class PowerStatesExtension extends Extension {
         if (this._destroyed || !this._initialized || !this._upowerWatcher || !this._settings)
             return;
 
-        if (key.startsWith('recovery-'))
+        if (key.startsWith('recovery-') || this._idleController?.isSyncingBaseline)
             return;
 
         if (key === 'ac-idle-action' || key === 'ac-idle-timeout') {
@@ -385,6 +385,34 @@ export default class PowerStatesExtension extends Extension {
         }
     }
 
+    _tryConsumeDeferredUndock(powerState, stateConfig, globalConfig) {
+        if (!this._deferredUndockGrace)
+            return false;
+
+        const undockFresh = GLib.get_monotonic_time() <= this._deferredUndockDeadlineUs;
+        const undockCheck = shouldTriggerClosedLidActionOnUndock({
+            lidClosed: this._lidController.lidClosed,
+            powerState,
+            stateConfig,
+            sleepMode: globalConfig.sleepMode,
+            capabilities: this._capabilities,
+            deferredUndockGrace: undockFresh,
+        });
+
+        this._deferredUndockGrace = false;
+        this._deferredUndockDeadlineUs = 0;
+
+        if (undockCheck.shouldTrigger) {
+            this._lidController.scheduleGraceAction(
+                globalConfig.unplugWhileClosedGraceSeconds,
+                powerState,
+                (gen, expectedState) => this._onLidClosed(gen, expectedState)
+            );
+            return true;
+        }
+        return false;
+    }
+
     /**
      * Handle external monitor topology changes:
      * - Always reconcile inhibitor ownership cleanly
@@ -413,31 +441,7 @@ export default class PowerStatesExtension extends Extension {
                 return;
             const currentState = resolvePowerState(reading, globalConfig);
             const stateConfig = readStateConfig(this._settings, currentState);
-
-            const undockFresh =
-                this._deferredUndockGrace &&
-                GLib.get_monotonic_time() <= this._deferredUndockDeadlineUs;
-            const undockCheck = shouldTriggerClosedLidActionOnUndock({
-                lidClosed: this._lidController.lidClosed,
-                powerState: currentState,
-                stateConfig,
-                sleepMode: globalConfig.sleepMode,
-                capabilities: this._capabilities,
-                deferredUndockGrace: undockFresh,
-            });
-
-            if (undockCheck.shouldTrigger) {
-                this._deferredUndockGrace = false;
-                this._deferredUndockDeadlineUs = 0;
-                this._lidController.scheduleGraceAction(
-                    globalConfig.unplugWhileClosedGraceSeconds,
-                    currentState,
-                    (gen, expectedState) => this._onLidClosed(gen, expectedState)
-                );
-            } else if (!undockFresh) {
-                this._deferredUndockGrace = false;
-                this._deferredUndockDeadlineUs = 0;
-            }
+            this._tryConsumeDeferredUndock(currentState, stateConfig, globalConfig);
         } else if (!wasConnected && isConnected) {
             this._deferredUndockGrace = false;
             this._deferredUndockDeadlineUs = 0;
@@ -578,6 +582,16 @@ export default class PowerStatesExtension extends Extension {
                         nextState,
                         (gen, expectedState) => this._onLidClosed(gen, expectedState)
                     );
+                } else if (
+                    this._deferredUndockGrace &&
+                    !this._lidController.externalMonitorConnected &&
+                    this._lidController.lidClosed &&
+                    (nextState === 'battery' || nextState === 'low-battery')
+                ) {
+                    // Consume a deferred USB-C undock whose monitor disconnect happened
+                    // during an incomplete reading, even if power state moved between
+                    // low-battery and battery before the next complete reading arrived.
+                    this._tryConsumeDeferredUndock(nextState, activeStateConfig, globalConfig);
                 } else if (stateChanged) {
                     const isPowerLossTransition =
                         (previousState === 'ac' &&
@@ -601,31 +615,6 @@ export default class PowerStatesExtension extends Extension {
                 } else if (!this._lidController.lidClosed) {
                     this._deferredUndockGrace = false;
                     this._deferredUndockDeadlineUs = 0;
-                } else if (
-                    this._deferredUndockGrace &&
-                    !this._lidController.externalMonitorConnected
-                ) {
-                    // Consume a deferred USB-C undock whose monitor disconnect happened
-                    // while the battery reading was temporarily incomplete.
-                    const undockFresh =
-                        GLib.get_monotonic_time() <= this._deferredUndockDeadlineUs;
-                    const undockCheck = shouldTriggerClosedLidActionOnUndock({
-                        lidClosed: this._lidController.lidClosed,
-                        powerState: nextState,
-                        stateConfig: activeStateConfig,
-                        sleepMode: globalConfig.sleepMode,
-                        capabilities: this._capabilities,
-                        deferredUndockGrace: undockFresh,
-                    });
-                    this._deferredUndockGrace = false;
-                    this._deferredUndockDeadlineUs = 0;
-                    if (undockCheck.shouldTrigger) {
-                        this._lidController.scheduleGraceAction(
-                            globalConfig.unplugWhileClosedGraceSeconds,
-                            nextState,
-                            (gen, expectedState) => this._onLidClosed(gen, expectedState)
-                        );
-                    }
                 }
             }
         }
