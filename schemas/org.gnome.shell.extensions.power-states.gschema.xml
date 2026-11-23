@@ -206,8 +206,8 @@
 
     <key name="pause-media-on-suspend" type="b">
       <default>true</default>
-      <summary>Pause media players before lid-triggered suspend</summary>
-      <description>Sends an MPRIS Pause command to active media players before suspending or hibernating on lid close.</description>
+      <summary>Pause media players before suspend</summary>
+      <description>Holds a bounded logind sleep delay inhibitor and sends an MPRIS Pause command to active media players on PrepareForSleep(true) before the system sleeps.</description>
     </key>
 
     <key name="unplug-while-closed-mode" type="s">

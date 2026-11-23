@@ -21,7 +21,7 @@ Power States spawns **zero background daemons**, **zero root helpers**, and **ze
 | **UPower** (System bus) | `org.freedesktop.UPower` (`/org/freedesktop/UPower`), `org.freedesktop.UPower.Device` (`DisplayDevice` + every `Type=1` `LINE_POWER` device) | `EnumerateDevices()`, `DeviceAdded`, `DeviceRemoved`, `Online`, `OnBattery`, `State`, `WarningLevel`, `Percentage`, `LidIsPresent`, **`LidIsClosed`** (required for lid inhibition so systemd ≤ 255 works reliably; dropping off the bus releases the lid FD immediately) | Read-only; no authentication |
 | **Power Profiles** (System bus) | `org.freedesktop.UPower.PowerProfiles` and legacy `net.hadess.PowerProfiles` | Reads `Profiles`, `ActiveProfile`, `ActiveProfileHolds`, `PerformanceDegraded`; async `Properties.Set` for `ActiveProfile`; watches `g-name-owner` on **both** bus names | Active local user allowed by PPD / `tuned-ppd` Polkit policy |
 | **systemd-logind** (System bus) | `org.freedesktop.login1.Manager` (`/org/freedesktop/login1`), canonical `org.freedesktop.login1.Session` resolved via `XDG_SESSION_ID` / `GetSessionByPID(0)` / `User.Display` | `GetSession()`, `GetSessionByPID(0)`, `User.Display`, `CanSuspend()`, `CanHibernate()`, `CanHybridSleep()`, `CanSuspendThenHibernate()`, `Inhibit("handle-lid-switch", ..., "block")`, bounded `Inhibit("sleep", ..., "delay")` with `_preparingForSleep` state machine, `Suspend(false)` / `Hibernate(false)` / `HybridSleep(false)` / `SuspendThenHibernate(false)`, `LidClosed`, `Docked`, `PrepareForSleep`, `Session.Active`, and `g-name-owner` restart recovery | Polkit `inhibit-handle-lid-switch`, `inhibit-delay-sleep`, `suspend`, `hibernate` default to `implicit active: yes` on standard desktop distros |
-| **Mutter DisplayConfig** (Session bus) | `org.gnome.Mutter.DisplayConfig` (`/org/gnome/Mutter/DisplayConfig`) | `GetCurrentState()` (checks `is-builtin` monitor property), `MonitorsChanged`, writable `PowerSaveMode` (`0`=On, `3`=Off) | Same user session |
+| **Mutter DisplayConfig** (Session bus) | `org.gnome.Mutter.DisplayConfig` (`/org/gnome/Mutter/DisplayConfig`) | `GetCurrentState()` (filters by active `logical_monitors`, checks `is-builtin` with sole-panel fallback), `MonitorsChanged`, writable `PowerSaveMode` (`0`=On, `3`=Off) | Same user session |
 | **GNOME ScreenSaver** (Session bus) | `org.gnome.ScreenSaver` (`/org/gnome/ScreenSaver`) | `Lock()` when lid action is `lock` | Same user session |
 | **MPRIS Media Players** (Session bus) | `org.mpris.MediaPlayer2.*` (`/org/mpris/MediaPlayer2`) | `Pause()` fired on `PrepareForSleep(true)` (only when sleep is actually accepted by `logind`) | Same user session |
 | **GNOME Settings Daemon** (GSettings) | `org.gnome.settings-daemon.plugins.power`, `org.gnome.desktop.session` | Direct source-of-truth for `sleep-inactive-{ac,battery}-{type,timeout}`; managed per-state swap for `idle-delay` | User `dconf` database |
@@ -35,12 +35,12 @@ flowchart TD
     EN["enable() — ++_initGeneration"] --> INIT["Async parallel init:<br/>probeSystemCapabilities()<br/>UPowerWatcher.initialize() (deferred emit)<br/>LidController.initialize()<br/>ProfileController.initialize()"]
     INIT --> GEN{"!_destroyed &&<br/>gen === _initGeneration?"}
     GEN -- No --> DROP["Abort stale continuation"]
-    GEN -- Yes --> READY["_initialized = true<br/>Initial _reconcile(reading, force=true)"]
+    GEN -- Yes --> READY["_initialized = true<br/>Initial _reconcile(reading, forceProfile=true, isInitialStartup=true)"]
     READY --> LIVE["Event-Driven Steady State<br/>(user + unlock-dialog modes)"]
     LIVE --> LOCK["Screen Locked (unlock-dialog)<br/>Extension stays alive -> FD stays held"]
     LOCK --> LIVE
     LIVE --> DIS["disable() — ++_initGeneration"]
-    DIS --> CLEAN["1. Disconnect GSettings & D-Bus signals<br/>2. Cancel grace & lap timers<br/>3. Close handle-lid-switch FD (GioUnix.InputStream)<br/>4. Unblank display if blanked by lid<br/>5. Ownership-checked restore of low-battery sleep & idle-delay"]
+    DIS --> CLEAN["1. Disconnect GSettings & D-Bus signals<br/>2. Cancel grace, retry & lap timers<br/>3. Close lid & sleep-delay FDs (GioUnix.InputStream)<br/>4. Unblank display if blanked by lid<br/>5. Ownership-checked restore of low-battery sleep & idle-delay"]
 ```
 
 ### Why `session-modes` Includes `"unlock-dialog"`
@@ -85,7 +85,7 @@ flowchart TD
     EXEC -- nothing --> NOOP["Stay awake"]
     EXEC -- lock --> LOCK["org.gnome.ScreenSaver.Lock()"]
     EXEC -- blank --> BLANK["Mutter DisplayConfig PowerSaveMode = 3"]
-    EXEC -- "suspend / hibernate /<br/>hybrid / s2h" --> SLEEP["login1.Manager.<Method>(false)"]
+    EXEC -- "suspend / hibernate /<br/>hybrid / s2h" --> SLEEP["login1.Manager.Suspend / Hibernate / HybridSleep / SuspendThenHibernate(false)"]
     SLEEP -- "Blocked by sleep inhibitor" --> ERR["Notify user: laptop still awake<br/>(media NOT paused)"]
     SLEEP -- "Accepted by logind" --> PREP["login1 emits PrepareForSleep(true)<br/>-> Pause active MPRIS players<br/>-> GNOME Shell locks screen if lock-enabled"]
 ```
@@ -114,7 +114,7 @@ When a closed laptop (`LidClosed === true`) loses AC power (`ac → battery` or 
 
 | Controller | State Field(s) | Purpose | Cleared / Restored On |
 |---|---|---|---|
-| `PowerStatesExtension` | `_initGeneration`, `_initialized`, `_destroyed`, `_initialReconcilePending`, `_loginCapProbeGeneration`, `_loginCapabilityRefreshNeeded` | Prevents stale async continuations, defers startup policy until complete UPower readings arrive, and refreshes `logind` sleep capabilities per owner generation with bounded retry | Every `enable()` / `disable()` / `logind` owner change |
+| `PowerStatesExtension` | `_initGeneration`, `_initialized`, `_destroyed`, `_initialReconcilePending`, `_loginCapProbeGeneration`, `_loginCapRetryTimerId` | Prevents stale async continuations, defers startup policy until complete UPower readings arrive, and refreshes `logind` sleep capabilities per owner generation with bounded retry | Every `enable()` / `disable()` / `logind` owner change |
 | `PowerStatesExtension` | `_lastPolicyState`, `_manualOverrideActive`, `_undockDeadlineUs` | Transition-only tracking, manual Quick Settings preservation, and 15s-bounded USB-C undock replay (never triggering on display-only AC disconnects) | Physical state change / lid reopen / active profile edit / `disable()` |
 | `UPowerWatcher` | `_ready`, `_ownerGen`, `_linePowerDevices` Map, `_attachingLinePower` Set | Suppresses premature events during initial enumeration; deduplicates per-owner `LINE_POWER` attachment and discards obsolete-owner discovery | `notify::g-name-owner` / `destroy()` |
 | `ProfileController` | `_candidates`, `_activeEntry`, `_inFlightWrite`, `_queuedWrite`, `_lastCommittedTarget`, `_expectedEchoes`, `_echoExpireTimerId`, `_lapDebounceId` | Serialized PPD writes across modern & legacy buses (with bounded no-op echo expiry); distinguishes extension echoes from manual Quick Settings edits independently of `PerformanceDegraded` batching | Echo/reply completion / expiry / `destroy()` |

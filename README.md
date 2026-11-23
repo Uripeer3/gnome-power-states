@@ -26,7 +26,7 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 - **Screen Blank Delay**: Per-state `org.gnome.desktop.session` `idle-delay` (optional; defaults to *Leave Unchanged* and restores your original baseline if the extension is disabled).
 
 ### General & Advanced
-- **Separated Sleep Mode**: *"Lid-Close Sleep Mode"* (*Standby*, *Suspend, then Hibernate*, or *Hybrid Sleep*) is configured once globally and transparently explains when Hibernate / Hybrid Sleep are not configured on the system.
+- **Separated Sleep Mode**: *"Lid-Close Sleep Mode"* (*Standby (RAM)*, *Suspend, then Hibernate*, or *Hybrid Sleep*) is configured once globally and transparently explains when Hibernate / Hybrid Sleep are not configured on the system.
 - **Low Battery Level**: Simple *Default (X%)* (follows UPower's system threshold) or *Custom* percentage (extension-only; does not edit `/etc/UPower/UPower.conf` or GNOME's system alerts).
 - **Advanced (collapsed by default)**: *Unplug Delay When Closed* (*Default (3s)* or *Custom* extension-only timer), *Transition Notifications*, and *Pause Media on Suspend*.
 - **Contextual Conflict Guardrails**: Surfaces an inline `Adw.Banner` in Preferences only when settings conflict (e.g., Screen Blank set at or after Automatic Suspend, or Battery Lid set to *Do Nothing*).
@@ -55,7 +55,7 @@ cd gnome-power-states
 make install
 ```
 
-On Wayland, log out and log back in once so GNOME Shell discovers the newly installed extension, then enable it and open Preferences:
+On Wayland, log out and log back in once after installing (or after schema updates on upgrade) so GNOME Shell loads the compiled GSettings schema, then enable the extension and open Preferences:
 
 ```bash
 make enable
@@ -104,7 +104,7 @@ gnome-power-states/
 │   ├── profileController.js     # PowerProfiles D-Bus + Quick Settings override detection + lap retry
 │   ├── lidController.js         # Unprivileged login1 FD inhibitor + LidClosed + DisplayConfig check
 │   ├── idleController.js        # Native gsd-power sync + idle-delay baseline snapshot/restore
-│   ├── mprisHelper.js           # Best-effort MPRIS Pause before lid sleep
+│   ├── mprisHelper.js           # Best-effort MPRIS Pause on PrepareForSleep(true)
 │   ├── capabilities.js          # Hardware & daemon capability prober
 │   ├── configStore.js           # Typed GSettings readers & schema-safe fallbacks
 │   ├── dbusXml.js               # Self-contained D-Bus interface definitions
