@@ -9,7 +9,7 @@
 // Run with: gjs -m tests/idleController.test.js
 
 import { DEFAULT_UNPLUG_GRACE_SECONDS, readGlobalConfig } from '../lib/configStore.js';
-import { IdleController, readRecoveryState, updateRecoveryState } from '../lib/idleController.js';
+import { IdleController, readRecoveryState, saveRecoveryState } from '../lib/idleController.js';
 
 let passed = 0;
 let failed = 0;
@@ -145,9 +145,9 @@ const sampleConfigs = {
     assertEqual(session.get_uint('idle-delay'), 300, 'first override applied 300');
 
     // Simulate crash right after writing pending=60 before native write occurs
-    updateRecoveryState(ext, s => {
-        s.idleDelay.pending = 60;
-    });
+    const s = readRecoveryState(ext);
+    s.idleDelay.pending = 60;
+    saveRecoveryState(ext, s);
     power.simulateProcessCrash();
     session.simulateProcessCrash();
 
@@ -336,9 +336,9 @@ const sampleConfigs = {
     const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
 
-    updateRecoveryState(ext, s => {
-        s.lowBatTimeout.baseline = 2400;
-    });
+    const s = readRecoveryState(ext);
+    s.lowBatTimeout.baseline = 2400;
+    saveRecoveryState(ext, s);
     idle.applyForState('ac', sampleConfigs, { stateChanged: true });
     assertEqual(power.get_int('sleep-inactive-battery-timeout'), 2400, 'restores live baseline 2400');
     idle.destroy();

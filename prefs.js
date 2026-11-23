@@ -887,8 +887,13 @@ class PrefsController {
     }
 
     _selectState(stateId) {
-        this._selectedState = stateId;
-        this._stateSwitcher.setActive(stateId);
+        this._syncingUi = true;
+        try {
+            this._selectedState = stateId;
+            this._stateSwitcher.setActive(stateId);
+        } finally {
+            this._syncingUi = false;
+        }
         this._refreshStateRows();
     }
 
@@ -908,10 +913,6 @@ class PrefsController {
             this._graceRow.visible = hasLid;
             if (!hasLid)
                 this._graceCustomRow.visible = false;
-
-            const canHibernate = this._capabilities.canHibernate;
-            this._lidChoices = LID_OPTIONS.filter(o => o.id !== 'hibernate' || canHibernate);
-            setModelIfChanged(this._lidRow, this._lidChoices.map(o => _(o.label)));
 
             if (!hasLid) {
                 this._sleepModeComboRow.visible = false;
