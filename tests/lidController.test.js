@@ -607,7 +607,63 @@ function makeFakeLoginProxy() {
     );
     assertEqual(externalChanges, extBefore + 2, 'lap-detected downgrade is not treated as manual override');
 
+    // Regression: No-op write (PPD replies OK without emitting PropertiesChanged) expires
+    // _expectedEchoes & _lastCommittedTarget after timeout so a later manual click is detected!
+    prof._echoExpireMs = 20;
+    prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
+    dbusCalls[6].done(null); // Reply succeeded, NO PropertiesChanged ever emitted
+    const expLoop = new GLib.MainLoop(null, false);
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+        expLoop.quit();
+        return GLib.SOURCE_REMOVE;
+    });
+    expLoop.run();
+    assertEqual(prof._lastCommittedTarget, null, 'no-op write expiry clears _lastCommittedTarget');
+    legacyEntry.proxy.ActiveProfile = 'performance';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'performance') })
+    );
+    assertEqual(externalChanges, extBefore + 3, 'manual click after no-op write expiry is detected as external');
+
     prof.destroy();
+})();
+
+// 9b. Regression: DisplayConfig ignores disabled external displays & single panel missing is-builtin
+(() => {
+    const lid = new LidController({});
+
+    // Case 1: eDP-1 active in logical_monitors, DP-1 physically connected but DISABLED
+    lid._displayProxy = {
+        GetCurrentStateRemote(cb) {
+            cb(
+                [
+                    1,
+                    [
+                        [['eDP-1'], [], { 'is-builtin': new GLib.Variant('b', true) }],
+                        [['DP-1'], [], { 'is-builtin': new GLib.Variant('b', false) }],
+                    ],
+                    [[0, 0, 1, 0, true, [['eDP-1', 'V', 'P', 'S']], {}]],
+                    {},
+                ],
+                null
+            );
+        },
+    };
+    lid._refreshExternalMonitorState(false);
+    drainMicrotasks();
+    assertEqual(lid.externalMonitorConnected, false, 'connected-but-disabled external display does not block suspend');
+
+    // Case 2: Single panel with omitted is-builtin defaults to built-in (not external)
+    lid._displayProxy = {
+        GetCurrentStateRemote(cb) {
+            cb([2, [[['eDP-1'], [], {}]], [], {}], null);
+        },
+    };
+    lid._refreshExternalMonitorState(false);
+    drainMicrotasks();
+    assertEqual(lid.externalMonitorConnected, false, 'sole panel missing is-builtin treated as built-in');
+
+    lid.destroy();
 })();
 
 // 10. Regression: UPowerWatcher reports known/partial provenance accurately

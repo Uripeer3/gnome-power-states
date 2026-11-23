@@ -222,7 +222,7 @@ export default class PowerStatesExtension extends Extension {
         const initGen = this._initGeneration;
         const probeGen = ++this._loginCapProbeGeneration;
 
-        probeLoginSleepCapabilities()
+        probeLoginSleepCapabilities(this._lidController.loginProxy)
             .then(sleepCaps => {
                 if (
                     this._destroyed ||
@@ -557,7 +557,18 @@ export default class PowerStatesExtension extends Extension {
                         (previousState === 'ac' &&
                             (nextState === 'battery' || nextState === 'low-battery')) ||
                         (previousState === 'battery' && nextState === 'low-battery');
-                    if (
+                    const isBatteryBounceWithActiveAction =
+                        ((previousState === 'low-battery' && nextState === 'battery') ||
+                            (previousState === 'battery' && nextState === 'low-battery')) &&
+                        this._lidController.lidClosed &&
+                        this._lidController.hasActiveGraceTimer &&
+                        lidDecision.actionOnClose !== 'nothing' &&
+                        lidDecision.actionOnClose !== 'system';
+
+                    if (isBatteryBounceWithActiveAction) {
+                        // Preserve an active unplug grace timer across low-battery <-> battery
+                        // percentage/warning bounces while still on battery with an active action.
+                    } else if (
                         isPowerLossTransition &&
                         this._lidController.lidClosed &&
                         lidDecision.blockedByExternalMonitor
@@ -592,11 +603,24 @@ export default class PowerStatesExtension extends Extension {
 
         const reading = this._upowerWatcher.getReading();
         const globalConfig = readGlobalConfig(this._settings);
-        if (!isPowerReadingComplete(reading, globalConfig))
-            return;
-        const currentState = resolvePowerState(reading, globalConfig);
 
-        if (expectedState !== null && currentState !== expectedState)
+        // Never drop a lid-close event while holding handle-lid-switch:
+        // if WarningLevel/Percentage is transiently incomplete, resolve from known AC/battery
+        // state, or fall back conservatively to last known state / 'battery'.
+        let currentState;
+        if (isPowerReadingComplete(reading, globalConfig))
+            currentState = resolvePowerState(reading, globalConfig);
+        else if (reading?.known)
+            currentState = reading.onBattery ? 'battery' : 'ac';
+        else
+            currentState = this._lastPolicyState ?? 'battery';
+
+        const stateMatches =
+            expectedState === null ||
+            currentState === expectedState ||
+            ((expectedState === 'battery' || expectedState === 'low-battery') &&
+                (currentState === 'battery' || currentState === 'low-battery'));
+        if (!stateMatches)
             return;
 
         const stateConfig = readStateConfig(this._settings, currentState);

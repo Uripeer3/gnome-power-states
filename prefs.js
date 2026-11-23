@@ -27,7 +27,7 @@ import {
     readStateConfig,
 } from './lib/configStore.js';
 import { readRecoveryState, updateRecoveryState } from './lib/idleController.js';
-import { detectPolicyConflicts } from './lib/policyEngine.js';
+import { detectPolicyConflicts, resolvePowerState } from './lib/policyEngine.js';
 import { readUPowerPercentageLow } from './lib/upowerConfig.js';
 
 const GSD_POWER_SCHEMA = 'org.gnome.settings-daemon.plugins.power';
@@ -244,6 +244,7 @@ class PrefsController {
         this._settings = settings;
         this._page = page;
         this._selectedState = 'ac';
+        this._userSelectedTab = false;
         this._syncingUi = false;
         this._destroyed = false;
         this._deferredRefreshId = null;
@@ -296,8 +297,11 @@ class PrefsController {
         this._capabilities = caps;
         this._applyCapabilities();
 
-        // Auto-select the current physical power state on open (like KDE PowerDevil)
-        this._selectState(caps.onBattery ? 'battery' : 'ac');
+        // Auto-select the current physical power state on open unless the user already clicked a tab
+        if (!this._userSelectedTab) {
+            const initialState = resolvePowerState(caps, readGlobalConfig(this._settings));
+            this._selectState(initialState);
+        }
         this._refreshAll();
     }
 
@@ -813,6 +817,8 @@ class PrefsController {
             group.active_name = this._selectedState;
             group.connect('notify::active-name', () => {
                 if (group.active_name && group.active_name !== this._selectedState) {
+                    if (!this._syncingUi)
+                        this._userSelectedTab = true;
                     this._selectedState = group.active_name;
                     this._refreshStateRows();
                 }
@@ -846,6 +852,8 @@ class PrefsController {
 
             btn.connect('toggled', () => {
                 if (btn.active && this._selectedState !== tab.id) {
+                    if (!this._syncingUi)
+                        this._userSelectedTab = true;
                     this._selectedState = tab.id;
                     this._refreshStateRows();
                 }
@@ -1018,7 +1026,12 @@ class PrefsController {
 
             this._selectComboById(this._profileRow, this._profileChoices, cfg.powerProfile);
 
-            // Lid action + dynamic user-friendly subtitle
+            // Lid action + dynamic user-friendly subtitle (preserve 'hibernate' if currently saved)
+            const canHibernate = this._capabilities.canHibernate;
+            this._lidChoices = LID_OPTIONS.filter(
+                o => o.id !== 'hibernate' || canHibernate || cfg.lidAction === 'hibernate'
+            );
+            setModelIfChanged(this._lidRow, this._lidChoices.map(o => _(o.label)));
             this._selectComboById(this._lidRow, this._lidChoices, cfg.lidAction);
             const activeLidOpt =
                 this._lidChoices.find(c => c.id === cfg.lidAction) ?? this._lidChoices[0];
@@ -1030,7 +1043,6 @@ class PrefsController {
             this._extMonRow.active = cfg.lidIgnoreExternalMonitor;
 
             // Automatic Suspend — preserve exact native values, keep Delay visible & grayed out when Off
-            const canHibernate = this._capabilities.canHibernate;
             const exactIdle = this._readExactIdleState(stateKey, cfg);
 
             const baseIdleChoices =
