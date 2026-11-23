@@ -14,12 +14,13 @@ import {
     gettext as _,
 } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import { probeSystemCapabilities } from './lib/capabilities.js';
+import { probeLoginSleepCapabilities, probeSystemCapabilities } from './lib/capabilities.js';
 import { SCHEMA_ID, readGlobalConfig, readStateConfig } from './lib/configStore.js';
 import { IdleController } from './lib/idleController.js';
 import { LidController } from './lib/lidController.js';
 import {
     POWER_STATES,
+    isPowerReadingComplete,
     resolveLidDecision,
     resolvePowerState,
     resolveProfileTransition,
@@ -69,8 +70,26 @@ export default class PowerStatesExtension extends Extension {
             onLoginOwnerChanged: isConnected => {
                 if (this._destroyed || !this._initialized || !this._upowerWatcher)
                     return;
-                if (isConnected)
-                    this._reconcile(this._upowerWatcher.getReading());
+                if (isConnected) {
+                    const gen = this._initGeneration;
+                    probeLoginSleepCapabilities()
+                        .then(sleepCaps => {
+                            if (this._destroyed || gen !== this._initGeneration)
+                                return;
+                            this._capabilities = { ...this._capabilities, ...sleepCaps };
+                        })
+                        .catch(() => {})
+                        .finally(() => {
+                            if (
+                                !this._destroyed &&
+                                this._initialized &&
+                                gen === this._initGeneration &&
+                                this._upowerWatcher
+                            ) {
+                                this._reconcile(this._upowerWatcher.getReading());
+                            }
+                        });
+                }
             },
             shouldPauseMediaOnSleep: () =>
                 Boolean(this._settings?.get_boolean('pause-media-on-suspend')),
@@ -89,7 +108,10 @@ export default class PowerStatesExtension extends Extension {
                     this._lidController?.setInhibitDesired(false);
                 } else {
                     this._lidController?.resetInhibitorFailure();
-                    this._reconcile(this._upowerWatcher.getReading());
+                    const reading = this._upowerWatcher.getReading();
+                    if (reading.lidStateKnown)
+                        this._lidController?.syncLidClosedSnapshot(reading.lidIsClosed);
+                    this._reconcile(reading);
                 }
             }
         );
@@ -137,9 +159,13 @@ export default class PowerStatesExtension extends Extension {
             this._capabilities = capRes.value;
 
         this._initialized = true;
+        const initialReading = this._upowerWatcher.getReading();
+        if (initialReading.lidStateKnown)
+            this._lidController?.syncLidClosedSnapshot(initialReading.lidIsClosed);
+
         // On initial startup: respect external application holds AND respect any
         // intervening native GSettings edits made while Shell was down.
-        this._reconcile(this._upowerWatcher.getReading(), {
+        this._reconcile(initialReading, {
             forceProfile: true,
             userEditedProfile: false,
             isInitialStartup: true,
@@ -280,9 +306,9 @@ export default class PowerStatesExtension extends Extension {
 
         if (wasConnected && !isConnected && this._lidController.lidClosed) {
             const reading = this._upowerWatcher.getReading();
-            if (!reading || reading.known === false)
-                return;
             const globalConfig = readGlobalConfig(this._settings);
+            if (!isPowerReadingComplete(reading, globalConfig))
+                return;
             const currentState = resolvePowerState(reading, globalConfig);
             const stateConfig = readStateConfig(this._settings, currentState);
 
@@ -320,9 +346,13 @@ export default class PowerStatesExtension extends Extension {
 
         const globalConfig = readGlobalConfig(this._settings);
 
+        if (reading?.lidStateKnown && this._upowerWatcher?.isConnected)
+            this._capabilities.lidIsPresent = reading.lidIsPresent;
+
         // Defer all state-dependent writes and startup marker clearing until we have
-        // a usable physical power reading (never guess AC during a UPower outage).
-        if (!reading || reading.known === false) {
+        // a complete physical power reading (never guess AC during a UPower outage, and
+        // never misclassify Low Battery as ordinary Battery on a partial root-only reading).
+        if (!isPowerReadingComplete(reading, globalConfig)) {
             if (this._lidController) {
                 this._lidController.setSleepDelayDesired(globalConfig.pauseMediaOnSuspend);
                 this._lidController.setInhibitDesired(false);
@@ -333,6 +363,9 @@ export default class PowerStatesExtension extends Extension {
         const effectiveInitialStartup = isInitialStartup || this._initialReconcilePending;
         const effectiveForceProfile = forceProfile || this._initialReconcilePending;
         this._initialReconcilePending = false;
+
+        if (effectiveInitialStartup && reading.lidStateKnown)
+            this._lidController?.syncLidClosedSnapshot(reading.lidIsClosed);
 
         const stateConfigs = this._readAllStateConfigs();
         const nextState = resolvePowerState(reading, globalConfig);
@@ -436,9 +469,9 @@ export default class PowerStatesExtension extends Extension {
         }
 
         const reading = this._upowerWatcher.getReading();
-        if (!reading || reading.known === false)
-            return;
         const globalConfig = readGlobalConfig(this._settings);
+        if (!isPowerReadingComplete(reading, globalConfig))
+            return;
         const currentState = resolvePowerState(reading, globalConfig);
 
         if (expectedState !== null && currentState !== expectedState)

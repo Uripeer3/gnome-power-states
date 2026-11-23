@@ -311,36 +311,83 @@ const sampleConfigs = {
     assertEqual(session.get_uint('idle-delay'), 480, 'restores 480 baseline on disable');
 })();
 
-// 3f. Regression: Second write after locked `applied` commit MUST NOT destroy recovery record!
+// 3f. Regression: Second write after locked `applied` commit MUST exercise prepare()'s
+//     promotion guard (with is_writable() === true!) and NEVER clobber `pending`!
+(() => {
+    for (const setterReturn of [true, false]) {
+        const ext = makeDefaultExtSettings();
+        const power = makeFakeSettings({
+            'sleep-inactive-battery-type': 'nothing',
+            'sleep-inactive-battery-timeout': 1800,
+        });
+        const session = makeFakeSettings({ 'idle-delay': 600 });
+
+        const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+        idle.applyForState('battery', sampleConfigs, { stateChanged: true });
+        assertEqual(session.get_uint('idle-delay'), 300, `battery applied 300 (setter=${setterReturn})`);
+
+        // Lock applied key, then apply Low Battery (60) -> pending=60 is the only record
+        ext.setWritable('recovery-idle-delay-applied', false);
+        idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+        assertEqual(session.get_uint('idle-delay'), 60, `low-battery applied 60 (setter=${setterReturn})`);
+        assertEqual(ext.get_int('recovery-idle-delay-pending'), 60, `pending=60 retained (setter=${setterReturn})`);
+
+        // Keep is_writable('idle-delay') === true so applyForState enters _applyManagedKey() -> prepare()!
+        // Instrument set_uint to verify prepare() refuses the second write BEFORE calling native setter.
+        const origSetUint = session.set_uint.bind(session);
+        let nativeSetCalls = 0;
+        session.set_uint = (k, v) => {
+            nativeSetCalls++;
+            return setterReturn ? origSetUint(k, v) : false;
+        };
+
+        idle.applyForState('battery', sampleConfigs, { stateChanged: true });
+        assertEqual(nativeSetCalls, 0, `prepare() blocked 2nd write before native setter (setter=${setterReturn})`);
+        assertEqual(ext.get_int('recovery-idle-delay-pending'), 60, `pending=60 preserved (setter=${setterReturn})`);
+
+        // Restore real setter and destroy -> MUST restore original 600 and clear recovery flag!
+        session.set_uint = origSetUint;
+        idle.destroy();
+        assertEqual(session.get_uint('idle-delay'), 600, `destroy restores 600 (setter=${setterReturn})`);
+        assertEqual(ext.get_boolean('recovery-idle-delay-active'), false, `flag cleared (setter=${setterReturn})`);
+    }
+})();
+
+// 3h. Regression: Partial legacy migration with locked timeout relinquishment retains legacy
+//     tombstone across destroy() of the owned type so a fresh controller preserves 1200!
 (() => {
     const ext = makeDefaultExtSettings();
+    ext.set_boolean('recovery-low-bat-active', true);
+    ext.set_string('recovery-low-bat-baseline-type', 'nothing');
+    ext.set_int('recovery-low-bat-baseline-timeout', 1800);
+    ext.set_string('recovery-low-bat-applied-type', 'suspend');
+    ext.set_int('recovery-low-bat-applied-timeout', 300);
+    ext.setWritable('recovery-low-bat-timeout-relinquished', false);
+
+    // Type matches legacy override ('suspend'), timeout was externally edited to 1200
     const power = makeFakeSettings({
-        'sleep-inactive-battery-type': 'nothing',
-        'sleep-inactive-battery-timeout': 1800,
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1200,
     });
     const session = makeFakeSettings({ 'idle-delay': 600 });
 
-    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
-    idle.applyForState('battery', sampleConfigs, { stateChanged: true });
-    assertEqual(session.get_uint('idle-delay'), 300, 'battery applied 300');
+    const idle1 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    assertEqual(ext.get_boolean('recovery-low-bat-active'), true, 'legacy flag retained for locked timeout marker');
+    idle1.destroy();
+    assertEqual(power.get_string('sleep-inactive-battery-type'), 'nothing', 'owned type restored to nothing');
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1200, 'external timeout 1200 untouched on destroy');
+    assertEqual(ext.get_boolean('recovery-low-bat-active'), true, 'legacy flag STILL retained after type destroy');
 
-    // Lock applied key, then apply Low Battery (60) -> pending=60 is the only record
-    ext.setWritable('recovery-idle-delay-applied', false);
-    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
-    assertEqual(session.get_uint('idle-delay'), 60, 'low-battery applied 60');
-    assertEqual(ext.get_int('recovery-idle-delay-pending'), 60, 'pending=60 retained');
+    // Fresh controller on Low Battery MUST preserve 1200 (not overwrite with 300) while managing type!
+    const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle2.applyForState('low-battery', sampleConfigs, { isInitialStartup: true });
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 1200, 'fresh controller preserves 1200 via legacy tombstone');
+    assertEqual(power.get_string('sleep-inactive-battery-type'), 'suspend', 'retired legacy type works normally on Low Battery');
 
-    // Next Battery transition attempts to write 300 while native write also fails:
-    // prepare MUST refuse to overwrite pending=60 while applied cannot commit 60!
-    session.setWritable('idle-delay', false);
-    idle.applyForState('battery', sampleConfigs, { stateChanged: true });
-    assertEqual(ext.get_int('recovery-idle-delay-pending'), 60, 'second write did not clobber pending=60');
-
-    // Unlock native key and destroy -> MUST restore original 600 and clear recovery flag!
-    session.setWritable('idle-delay', true);
-    idle.destroy();
-    assertEqual(session.get_uint('idle-delay'), 600, 'destroy still restores original 600 after second write');
-    assertEqual(ext.get_boolean('recovery-idle-delay-active'), false, 'recovery flag cleared after restore');
+    // Leaving Low Battery clears the unresolved legacy marker cleanly
+    idle2.applyForState('ac', sampleConfigs, { stateChanged: true });
+    assertEqual(ext.get_boolean('recovery-low-bat-active'), false, 'legacy flag cleared once state leaves Low Battery');
+    idle2.destroy();
 })();
 
 // 3g. Regression: Locked relinquishment key retains mismatched journal as tombstone across restart!

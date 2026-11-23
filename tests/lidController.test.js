@@ -14,8 +14,13 @@
 
 import GLib from 'gi://GLib';
 
+import { probeLoginSleepCapabilities } from '../lib/capabilities.js';
 import { LidController } from '../lib/lidController.js';
-import { resolveProfileTransition } from '../lib/policyEngine.js';
+import {
+    UPOWER_WARNING,
+    isPowerReadingComplete,
+    resolveProfileTransition,
+} from '../lib/policyEngine.js';
 import { ProfileController } from '../lib/profileController.js';
 import { UPowerWatcher } from '../lib/upowerWatcher.js';
 
@@ -600,7 +605,7 @@ function makeFakeLoginProxy() {
     prof.destroy();
 })();
 
-// 10. Regression: UPowerWatcher reports known=false when UPower has no usable live data
+// 10. Regression: UPowerWatcher reports known/partial provenance accurately
 (() => {
     const watcher = new UPowerWatcher(() => {});
     assertEqual(watcher.getReading().known, false, 'no UPower proxies -> reading.known is false');
@@ -609,13 +614,121 @@ function makeFakeLoginProxy() {
     watcher._upowerProxy = { g_name_owner: null, OnBattery: false, disconnect() {}, disconnectSignal() {} };
     assertEqual(watcher.getReading().known, false, 'disconnected UPower proxy -> reading.known is false');
 
-    // Live proxy reporting OnBattery=true -> known=true, onBattery=true!
+    // Live root proxy ONLY reporting OnBattery=true (DisplayDevice absent) -> partial reading!
     watcher._upowerProxy.g_name_owner = ':1.55';
     watcher._upowerProxy.OnBattery = true;
-    const liveReading = watcher.getReading();
-    assertEqual(liveReading.known, true, 'live UPower proxy -> reading.known is true');
-    assertEqual(liveReading.onBattery, true, 'live UPower proxy reports true onBattery');
+    watcher._upowerProxy.LidIsClosed = true;
+    const partial = watcher.getReading();
+    assertEqual(partial.known, true, 'live root proxy -> reading.known is true');
+    assertEqual(partial.onBattery, true, 'live root proxy reports onBattery=true');
+    assertEqual(partial.warningLevelKnown, false, 'missing DisplayDevice -> warningLevelKnown=false');
+    assertEqual(partial.percentageKnown, false, 'missing DisplayDevice -> percentageKnown=false');
+    assertEqual(partial.lidStateKnown, true, 'live root proxy -> lidStateKnown=true');
+    assertEqual(partial.lidIsClosed, true, 'live root proxy reports lidIsClosed=true');
+    assertEqual(
+        isPowerReadingComplete(partial, { lowBatteryMode: 'upower' }),
+        false,
+        'root-only battery reading is incomplete until DisplayDevice arrives'
+    );
+
+    // Once DisplayDevice arrives with WarningLevel=LOW -> reading is complete!
+    watcher._displayProxy = {
+        g_name_owner: ':1.55',
+        WarningLevel: UPOWER_WARNING.LOW,
+        Percentage: 12,
+        disconnect() {},
+    };
+    const complete = watcher.getReading();
+    assertEqual(complete.warningLevelKnown, true, 'live DisplayDevice sets warningLevelKnown=true');
+    assertEqual(complete.percentageKnown, true, 'live DisplayDevice sets percentageKnown=true');
+    assertEqual(
+        isPowerReadingComplete(complete, { lowBatteryMode: 'upower' }),
+        true,
+        'complete battery reading accepted once DisplayDevice reports WarningLevel'
+    );
     watcher.destroy();
+})();
+
+// 11. Regression: syncLidClosedSnapshot seeds already-closed lid on startup without synthesizing close edge
+(() => {
+    let closeEdges = 0;
+    const lid = new LidController({
+        onLidCloseRequested: () => {
+            closeEdges++;
+        },
+    });
+    lid._sessionActive = true;
+    lid._inhibitorStream = { close() {} };
+
+    lid.syncLidClosedSnapshot(true);
+    assertEqual(lid.lidClosed, true, 'syncLidClosedSnapshot seeds already-closed lid');
+    assertEqual(closeEdges, 0, 'syncLidClosedSnapshot does NOT synthesize a new close edge');
+
+    // Unplug grace action now sees lidClosed === true and schedules cleanly!
+    let graceFired = false;
+    lid._refreshExternalMonitorState = () => Promise.resolve();
+    lid.scheduleGraceAction(0, 'battery', () => {
+        graceFired = true;
+    });
+    const loop = new GLib.MainLoop(null, false);
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 40, () => {
+        loop.quit();
+        return GLib.SOURCE_REMOVE;
+    });
+    loop.run();
+    drainMicrotasks();
+    assertEqual(graceFired, true, 'grace action fires after startup snapshot seeded closed lid');
+    lid.destroy();
+})();
+
+// 12. Regression: probeLoginSleepCapabilities distinguishes probe failure from real 'no' answer
+(() => {
+    const failingProxy = {
+        g_name_owner: ':1.1',
+        CanSuspendRemote(cb) { cb(null, new Error('Service unavailable')); },
+        CanHibernateRemote(cb) { cb(null, new Error('Service unavailable')); },
+        CanHybridSleepRemote(cb) { cb(null, new Error('Service unavailable')); },
+        CanSuspendThenHibernateRemote(cb) { cb(null, new Error('Service unavailable')); },
+    };
+    let failedCaps = null;
+    probeLoginSleepCapabilities(failingProxy).then(c => {
+        failedCaps = c;
+    });
+    drainMicrotasks();
+    assertEqual(failedCaps.login1Probed, false, 'failed Can* calls do NOT set login1Probed=true');
+    assertEqual(failedCaps.canSuspend, true, 'failed probe keeps safe canSuspend=true fallback');
+
+    const negativeProxy = {
+        g_name_owner: ':1.2',
+        CanSuspendRemote(cb) { cb(['no'], null); },
+        CanHibernateRemote(cb) { cb(['na'], null); },
+        CanHybridSleepRemote(cb) { cb(['no'], null); },
+        CanSuspendThenHibernateRemote(cb) { cb(['no'], null); },
+    };
+    let negCaps = null;
+    probeLoginSleepCapabilities(negativeProxy).then(c => {
+        negCaps = c;
+    });
+    drainMicrotasks();
+    assertEqual(negCaps.login1Probed, true, 'successful negative Can* calls set login1Probed=true');
+    assertEqual(negCaps.canSuspend, false, 'real no answer sets canSuspend=false');
+
+    const recoveredProxy = {
+        g_name_owner: ':1.3',
+        CanSuspendRemote(cb) { cb(['yes'], null); },
+        CanHibernateRemote(cb) { cb(['yes'], null); },
+        CanHybridSleepRemote(cb) { cb(['no'], null); },
+        CanSuspendThenHibernateRemote(cb) { cb(['yes'], null); },
+    };
+    let recCaps = null;
+    probeLoginSleepCapabilities(recoveredProxy).then(c => {
+        recCaps = c;
+    });
+    drainMicrotasks();
+    assertEqual(recCaps.login1Probed, true, 'recovered login1 probe succeeds');
+    assertEqual(recCaps.canSuspend, true, 'recovered canSuspend=true');
+    assertEqual(recCaps.canHibernate, true, 'recovered canHibernate=true');
+    assertEqual(recCaps.canSuspendThenHibernate, true, 'recovered canSuspendThenHibernate=true');
 })();
 
 if (failed > 0) {

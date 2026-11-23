@@ -4,6 +4,7 @@
 import {
     UPOWER_WARNING,
     detectPolicyConflicts,
+    isPowerReadingComplete,
     resolveLidDecision,
     resolvePowerState,
     resolveProfileTransition,
@@ -81,6 +82,64 @@ test('resolvePowerState: custom percentage trigger', () => {
         resolvePowerState({ onBattery: true, warningLevel: UPOWER_WARNING.NONE, percentage: 25 }, cfg),
         'low-battery',
         'at threshold'
+    );
+});
+
+test('isPowerReadingComplete: AC resolves independently; battery requires trigger input', () => {
+    assertEqual(isPowerReadingComplete({ known: false, onBattery: false }), false, 'unknown reading deferred');
+    assertEqual(
+        isPowerReadingComplete({
+            known: true,
+            onBattery: false,
+            warningLevelKnown: false,
+            percentageKnown: false,
+        }),
+        true,
+        'AC resolves even without DisplayDevice'
+    );
+    assertEqual(
+        isPowerReadingComplete(
+            { known: true, onBattery: true, warningLevelKnown: false, percentageKnown: false },
+            { lowBatteryMode: 'upower' }
+        ),
+        false,
+        'partial battery reading deferred in upower mode'
+    );
+    assertEqual(
+        isPowerReadingComplete(
+            { known: true, onBattery: true, warningLevelKnown: false, percentageKnown: false },
+            { lowBatteryMode: 'percentage' }
+        ),
+        false,
+        'partial battery reading deferred in percentage mode'
+    );
+    assertEqual(
+        isPowerReadingComplete(
+            {
+                known: true,
+                onBattery: true,
+                warningLevelKnown: true,
+                warningLevel: UPOWER_WARNING.LOW,
+                percentageKnown: false,
+            },
+            { lowBatteryMode: 'upower' }
+        ),
+        true,
+        'complete upower battery reading accepted'
+    );
+    assertEqual(
+        isPowerReadingComplete(
+            {
+                known: true,
+                onBattery: true,
+                warningLevelKnown: false,
+                percentageKnown: true,
+                percentage: 15,
+            },
+            { lowBatteryMode: 'percentage' }
+        ),
+        true,
+        'complete percentage battery reading accepted'
     );
 });
 

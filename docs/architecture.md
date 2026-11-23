@@ -70,12 +70,14 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    LID["login1.Manager PropertiesChanged<br/>LidClosed: GLib.Variant(bool)"] --> UNPACK["Explicitly unpack GLib.Variant<br/>(avoids boxed Variant truthiness bug)"]
+    LID["Dual lid event feed:<br/>UPower.LidIsClosed + login1.LidClosed<br/>(snapshot synced on startup/reconnect)"] --> UNPACK["Explicitly unpack GLib.Variant<br/>& deduplicate edge transitions"]
     UNPACK --> EDGE{"false -> true?"}
     EDGE -- "true -> false (reopen)" --> OPEN["++_actionGeneration<br/>Cancel unplug grace timer<br/>Restore DisplayConfig PowerSaveMode=0 if lid-blanked"]
-    EDGE -- "false -> true (close)" --> FD{"Holding our<br/>handle-lid-switch FD?"}
-    FD -- No --> SKIP["Do nothing (avoid racing logind)"]
-    FD -- Yes --> MON["gen = ++_actionGeneration<br/>Refresh external monitor via<br/>Mutter DisplayConfig (fallback: login1.Docked)"]
+    EDGE -- "false -> true (close)" --> FD{"handle-lid-switch FD<br/>state (active session)?"}
+    FD -- "Neither held nor in-flight" --> SKIP["Do nothing (avoid racing logind)"]
+    FD -- "Acquisition in flight" --> QUEUE["Queue close edge (_pendingGraceAfterFd)<br/>Replay once current-owner FD arrives"]
+    FD -- "Held" --> MON["gen = ++_actionGeneration<br/>Refresh external monitor via<br/>Mutter DisplayConfig (fallback: login1.Docked)"]
+    QUEUE --> MON
     MON --> VALID{"Still closed, FD held,<br/>and gen matches?"}
     VALID -- No --> ABORT["Abort (reopened mid-flight)"]
     VALID -- Yes --> DEC["policyEngine.resolveLidDecision()<br/>(checks externalMonitorConnected &<br/>lidIgnoreExternalMonitor)"]
