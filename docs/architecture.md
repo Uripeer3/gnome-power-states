@@ -93,8 +93,9 @@ flowchart TD
 ### C. Unplug-While-Closed Grace Flow
 If AC is disconnected while `LidClosed === true` (`ac → battery` or `battery → low-battery`) and the new state's lid action is active (`suspend`, `hibernate`, `lock`, `blank`):
 1. `LidController.scheduleGraceAction(graceSeconds, ...)` starts a one-shot `GLib.timeout_add_seconds` timer tied to a new `_actionGeneration`.
-2. Reopening the lid, reconnecting AC, or changing policy increments `_actionGeneration` and cancels the timer cleanly.
-3. When the timer expires, external-monitor status and lid state are re-verified right before invoking the action.
+2. If the laptop was docked on a USB-C dock (`blockedByExternalMonitor === true` when power dropped), `PowerStatesExtension` records `_deferredUndockGrace = true` so the imminent external-monitor disconnect from the same undock triggers the grace timer; disconnecting a monitor on uninterrupted AC or without a deferred power-loss transition never triggers suspend.
+3. Reopening the lid, reconnecting AC, redocking an external monitor, or changing policy clears `_deferredUndockGrace`, increments `_actionGeneration`, and cancels the timer cleanly.
+4. When the timer expires, external-monitor status and lid state are re-verified right before invoking the action.
 
 ---
 
@@ -113,11 +114,11 @@ If AC is disconnected while `LidClosed === true` (`ac → battery` or `battery �
 
 | Controller | State Field(s) | Purpose | Cleared / Restored On |
 |---|---|---|---|
-| `PowerStatesExtension` | `_initGeneration`, `_initialized`, `_destroyed` | Prevents rapid `disable()` → `enable()` races from stale async continuations | Every `enable()` / `disable()` |
-| `PowerStatesExtension` | `_lastPolicyState`, `_manualOverrideActive` | Transition-only tracking & preserving manual Quick Settings overrides | Physical state change / active profile edit / `disable()` |
-| `UPowerWatcher` | `_ready`, `_linePowerDevices` Map | Suppresses premature events during initial enumeration; watches all `LINE_POWER` adapters | `destroy()` |
-| `ProfileController` | `_candidates`, `_activeEntry`, `_inFlightWrite`, `_queuedWrite`, `_lastCommittedTarget`, `_expectedEchoes`, `_lapDebounceId` | Serialized PPD writes across modern & legacy buses (retaining target between D-Bus reply and `PropertiesChanged` echo); distinguishes extension echoes from manual Quick Settings edits | Echo/reply completion / `destroy()` |
-| `LidController` | `_inhibitorStream`, `_sleepDelayStream`, `_loginOwnerGen`, `_lidInFlightOwnerGen`, `_sleepDelayInFlightOwnerGen`, `_sessionActive`, `_lidClosed`, `_externalMonitorConnected`, `_monitorRefreshSeq`, `_monitorNotifyPending`, `_preparingForSleep`, `_actionGeneration`, `_graceTimerId`, `_pendingGraceAfterFd` | Fail-closed canonical session gating, owner-generation FD lifecycle, coalesced topology queries, and queued close/grace replay | Lid reopen / policy change / owner change / `destroy()` |
+| `PowerStatesExtension` | `_initGeneration`, `_initialized`, `_destroyed`, `_initialReconcilePending`, `_loginCapProbeGeneration`, `_loginCapabilityRefreshNeeded` | Prevents stale async continuations, defers startup policy until complete UPower readings arrive, and refreshes `logind` sleep capabilities per owner generation with bounded retry | Every `enable()` / `disable()` / `logind` owner change |
+| `PowerStatesExtension` | `_lastPolicyState`, `_manualOverrideActive`, `_deferredUndockGrace` | Transition-only tracking, manual Quick Settings preservation, and scoped USB-C undock replay (never triggering on display-only AC disconnects) | Physical state change / lid reopen / active profile edit / `disable()` |
+| `UPowerWatcher` | `_ready`, `_ownerGen`, `_linePowerDevices` Map, `_attachingLinePower` Set | Suppresses premature events during initial enumeration; deduplicates concurrent `LINE_POWER` attachment and discards obsolete-owner discovery | `notify::g-name-owner` / `destroy()` |
+| `ProfileController` | `_candidates`, `_activeEntry`, `_inFlightWrite`, `_queuedWrite`, `_lastCommittedTarget`, `_expectedEchoes`, `_lapDebounceId` | Serialized PPD writes across modern & legacy buses (retaining target between D-Bus reply and `PropertiesChanged` echo); distinguishes extension echoes from manual Quick Settings edits independently of `PerformanceDegraded` batching | Echo/reply completion / `destroy()` |
+| `LidController` | `_inhibitorStream`, `_sleepDelayStream`, `_loginOwnerGen`, `_lidInFlightOwnerGen`, `_sleepDelayInFlightOwnerGen`, `_sessionActive`, `_lidClosed`, `_externalMonitorConnected`, `_monitorQueryInFlight`, `_monitorRefreshQueued`, `_monitorNotifyPending`, `_preparingForSleep`, `_actionGeneration`, `_graceTimerId`, `_pendingGraceAfterFd` | Fail-closed canonical session gating, owner-generation FD lifecycle, single-flight coalesced topology queries, startup/reconnect lid snapshots, and queued close/grace replay | Lid reopen / policy change / owner change / `destroy()` |
 | `IdleController` | Persisted WAL keys + `recovery-*-relinquished*` keys + in-memory mirrors | Per-key ownership relinquishment (surviving same-state disable/enable) and 2-phase WAL crash recovery | Physical state transition / explicit prefs edit / `destroy()` |
 
 ---

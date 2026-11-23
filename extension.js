@@ -8,6 +8,8 @@
 //   next physical power transition (plugging in, unplugging, or entering/leaving
 //   low battery).
 
+import GLib from 'gi://GLib';
+
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {
     Extension,
@@ -25,6 +27,7 @@ import {
     resolvePowerState,
     resolveProfileTransition,
     shouldTriggerClosedLidActionOnTransition,
+    shouldTriggerClosedLidActionOnUndock,
 } from './lib/policyEngine.js';
 import { ProfileController } from './lib/profileController.js';
 import { UPowerWatcher } from './lib/upowerWatcher.js';
@@ -59,37 +62,37 @@ export default class PowerStatesExtension extends Extension {
         this._lastPolicyState = null;
         this._manualOverrideActive = false;
         this._initialReconcilePending = true;
+        this._deferredUndockGrace = false;
+        this._loginCapProbeGeneration = 0;
+        this._loginCapabilityRefreshNeeded = false;
+        this._loginCapRetryTimerId = null;
 
         this._idleController = new IdleController(this._settings);
 
         this._lidController = new LidController({
             onLidCloseRequested: (gen, expectedState) => this._onLidClosed(gen, expectedState),
+            onLidOpened: () => {
+                this._deferredUndockGrace = false;
+            },
             onExternalMonitorChanged: (wasConnected, isConnected) =>
                 this._onExternalMonitorChanged(wasConnected, isConnected),
             onSessionActiveChanged: isActive => this._onSessionActiveChanged(isActive),
-            onLoginOwnerChanged: isConnected => {
-                if (this._destroyed || !this._initialized || !this._upowerWatcher)
+            onLoginOwnerChanged: (isConnected, ownerGen) => {
+                if (this._destroyed)
                     return;
-                if (isConnected) {
-                    const gen = this._initGeneration;
-                    probeLoginSleepCapabilities()
-                        .then(sleepCaps => {
-                            if (this._destroyed || gen !== this._initGeneration)
-                                return;
-                            this._capabilities = { ...this._capabilities, ...sleepCaps };
-                        })
-                        .catch(() => {})
-                        .finally(() => {
-                            if (
-                                !this._destroyed &&
-                                this._initialized &&
-                                gen === this._initGeneration &&
-                                this._upowerWatcher
-                            ) {
-                                this._reconcile(this._upowerWatcher.getReading());
-                            }
-                        });
+                this._clearLoginCapRetryTimer();
+                if (!isConnected) {
+                    // Invalidate any in-flight capability probe from the lost owner
+                    this._loginCapProbeGeneration++;
+                    this._loginCapabilityRefreshNeeded = false;
+                    return;
                 }
+                if (!this._initialized) {
+                    // Record recovery that happened while _initAsync is still settling
+                    this._loginCapabilityRefreshNeeded = true;
+                    return;
+                }
+                this._refreshLoginCapabilities(ownerGen, 0);
             },
             shouldPauseMediaOnSleep: () =>
                 Boolean(this._settings?.get_boolean('pause-media-on-suspend')),
@@ -145,6 +148,7 @@ export default class PowerStatesExtension extends Extension {
     }
 
     async _initAsync(generation) {
+        const startOwnerGen = this._lidController.loginOwnerGeneration;
         const [capRes] = await Promise.allSettled([
             probeSystemCapabilities(),
             this._upowerWatcher.initialize(),
@@ -155,8 +159,24 @@ export default class PowerStatesExtension extends Extension {
         if (this._destroyed || generation !== this._initGeneration)
             return;
 
-        if (capRes.status === 'fulfilled')
-            this._capabilities = capRes.value;
+        const ownerChangedDuringInit =
+            this._loginCapabilityRefreshNeeded ||
+            this._lidController.loginOwnerGeneration !== startOwnerGen;
+
+        if (capRes.status === 'fulfilled') {
+            if (ownerChangedDuringInit) {
+                // Keep non-login1 fields (e.g. lidIsPresent, profiles) without installing
+                // sleep capabilities queried from an obsolete logind owner.
+                this._capabilities = {
+                    ...this._capabilities,
+                    lidIsPresent: capRes.value.lidIsPresent,
+                    availableProfiles: capRes.value.availableProfiles,
+                    hasPowerProfiles: capRes.value.hasPowerProfiles,
+                };
+            } else {
+                this._capabilities = capRes.value;
+            }
+        }
 
         this._initialized = true;
         const initialReading = this._upowerWatcher.getReading();
@@ -170,6 +190,73 @@ export default class PowerStatesExtension extends Extension {
             userEditedProfile: false,
             isInitialStartup: true,
         });
+
+        // If logind recovered during startup OR the initial sleep probe was inconclusive,
+        // run an owner-generation-scoped refresh (with bounded retry on transient failures).
+        if (
+            (ownerChangedDuringInit || !this._capabilities.login1Probed) &&
+            this._lidController.isLoginConnected
+        ) {
+            this._loginCapabilityRefreshNeeded = false;
+            this._refreshLoginCapabilities(this._lidController.loginOwnerGeneration, 0);
+        }
+    }
+
+    _clearLoginCapRetryTimer() {
+        if (this._loginCapRetryTimerId) {
+            GLib.Source.remove(this._loginCapRetryTimerId);
+            this._loginCapRetryTimerId = null;
+        }
+    }
+
+    _refreshLoginCapabilities(expectedOwnerGen, retryAttempt = 0) {
+        if (this._destroyed || !this._initialized || !this._lidController)
+            return;
+
+        this._clearLoginCapRetryTimer();
+        const initGen = this._initGeneration;
+        const probeGen = ++this._loginCapProbeGeneration;
+
+        probeLoginSleepCapabilities()
+            .then(sleepCaps => {
+                if (
+                    this._destroyed ||
+                    initGen !== this._initGeneration ||
+                    probeGen !== this._loginCapProbeGeneration ||
+                    expectedOwnerGen !== this._lidController?.loginOwnerGeneration
+                ) {
+                    return;
+                }
+
+                this._capabilities = { ...this._capabilities, ...sleepCaps };
+
+                if (
+                    !sleepCaps.login1Probed &&
+                    this._lidController?.isLoginConnected &&
+                    retryAttempt < 3
+                ) {
+                    const delaySec = 2 * (1 << retryAttempt);
+                    this._loginCapRetryTimerId = GLib.timeout_add_seconds(
+                        GLib.PRIORITY_DEFAULT,
+                        delaySec,
+                        () => {
+                            this._loginCapRetryTimerId = null;
+                            if (
+                                !this._destroyed &&
+                                initGen === this._initGeneration &&
+                                expectedOwnerGen === this._lidController?.loginOwnerGeneration
+                            ) {
+                                this._refreshLoginCapabilities(expectedOwnerGen, retryAttempt + 1);
+                            }
+                            return GLib.SOURCE_REMOVE;
+                        }
+                    );
+                }
+
+                if (this._upowerWatcher)
+                    this._reconcile(this._upowerWatcher.getReading());
+            })
+            .catch(() => {});
     }
 
     disable() {
@@ -177,6 +264,8 @@ export default class PowerStatesExtension extends Extension {
         // the screen does NOT call disable() and drop our handle-lid-switch FD
         // while the laptop lid is closed or keep-awake on AC is active.
         this._initGeneration++;
+        this._loginCapProbeGeneration++;
+        this._clearLoginCapRetryTimer();
         this._destroyed = true;
         this._initialized = false;
 
@@ -201,6 +290,8 @@ export default class PowerStatesExtension extends Extension {
         this._lastPolicyState = null;
         this._manualOverrideActive = false;
         this._initialReconcilePending = false;
+        this._deferredUndockGrace = false;
+        this._loginCapabilityRefreshNeeded = false;
     }
 
     _readAllStateConfigs() {
@@ -231,6 +322,7 @@ export default class PowerStatesExtension extends Extension {
 
         // Changing lid or sleep policy cancels any pending grace action and resets retry block
         if (key.includes('-lid-') || key === 'sleep-mode' || key.startsWith('unplug-while-closed-')) {
+            this._deferredUndockGrace = false;
             this._lidController?.cancelGraceTimer();
             this._lidController?.resetInhibitorFailure();
         }
@@ -312,14 +404,17 @@ export default class PowerStatesExtension extends Extension {
             const currentState = resolvePowerState(reading, globalConfig);
             const stateConfig = readStateConfig(this._settings, currentState);
 
-            const decision = resolveLidDecision({
+            const undockCheck = shouldTriggerClosedLidActionOnUndock({
+                lidClosed: this._lidController.lidClosed,
+                powerState: currentState,
                 stateConfig,
-                externalMonitorConnected: false,
                 sleepMode: globalConfig.sleepMode,
                 capabilities: this._capabilities,
+                deferredUndockGrace: this._deferredUndockGrace,
             });
 
-            if (decision.actionOnClose !== 'nothing' && decision.actionOnClose !== 'system') {
+            if (undockCheck.shouldTrigger) {
+                this._deferredUndockGrace = false;
                 this._lidController.scheduleGraceAction(
                     globalConfig.unplugWhileClosedGraceSeconds,
                     currentState,
@@ -327,6 +422,7 @@ export default class PowerStatesExtension extends Extension {
                 );
             }
         } else if (!wasConnected && isConnected) {
+            this._deferredUndockGrace = false;
             this._lidController.cancelGraceTimer();
         }
     }
@@ -355,7 +451,10 @@ export default class PowerStatesExtension extends Extension {
         if (!isPowerReadingComplete(reading, globalConfig)) {
             if (this._lidController) {
                 this._lidController.setSleepDelayDesired(globalConfig.pauseMediaOnSuspend);
-                this._lidController.setInhibitDesired(false);
+                // Preserve any active lid inhibitor while UPower root & lid feed stay live;
+                // only release here if UPower itself disconnected or lid is absent.
+                if (!this._upowerWatcher?.isConnected || !this._capabilities.lidIsPresent)
+                    this._lidController.setInhibitDesired(false);
             }
             return;
         }
@@ -442,13 +541,31 @@ export default class PowerStatesExtension extends Extension {
                 });
 
                 if (closedCheck.shouldTrigger) {
+                    this._deferredUndockGrace = false;
                     this._lidController.scheduleGraceAction(
                         globalConfig.unplugWhileClosedGraceSeconds,
                         nextState,
                         (gen, expectedState) => this._onLidClosed(gen, expectedState)
                     );
                 } else if (stateChanged) {
-                    this._lidController.cancelGraceTimer();
+                    const isPowerLossTransition =
+                        (previousState === 'ac' &&
+                            (nextState === 'battery' || nextState === 'low-battery')) ||
+                        (previousState === 'battery' && nextState === 'low-battery');
+                    if (
+                        isPowerLossTransition &&
+                        this._lidController.lidClosed &&
+                        lidDecision.blockedByExternalMonitor
+                    ) {
+                        // Power dropped while docked with lid shut; allow imminent monitor
+                        // disconnect from the same undock to trigger the unplug grace action.
+                        this._deferredUndockGrace = true;
+                    } else {
+                        this._deferredUndockGrace = false;
+                        this._lidController.cancelGraceTimer();
+                    }
+                } else if (!this._lidController.lidClosed) {
+                    this._deferredUndockGrace = false;
                 }
             }
         }

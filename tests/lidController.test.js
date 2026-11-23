@@ -176,12 +176,17 @@ function makeFakeLoginProxy() {
         {},
     ];
 
-    // Notifying query #1 (MonitorsChanged) superseded by silent query #2 (lid close)!
+    // Notifying query #1 (MonitorsChanged) superseded by silent query #2 (lid close)
+    // AND a 3rd overlapping query -> single-flight coalescing keeps at most 1 RPC in flight
+    // and coalesces the 2nd + 3rd triggers into ONE trailing query!
     lid._refreshExternalMonitorState(true);
     lid.notifyLidClosed(true);
+    lid._refreshExternalMonitorState(true);
+    assertEqual(pendingQueries.length, 1, 'single-flight coalescing keeps only 1 DisplayConfig RPC in flight');
 
     pendingQueries[0](dockedResult, null);
     drainMicrotasks();
+    assertEqual(pendingQueries.length, 2, 'coalesced trailing triggers launch exactly 1 follow-up RPC');
     assertEqual(observedDockedOnClose, null, 'superseded query waits for latest query');
 
     pendingQueries[1](dockedResult, null);
@@ -190,7 +195,7 @@ function makeFakeLoginProxy() {
     assertEqual(
         monitorCallbacks.length,
         1,
-        'notifying query superseded by silent query still emits onExternalMonitorChanged'
+        'notifying query superseded by silent query still emits onExternalMonitorChanged once'
     );
     assertEqual(monitorCallbacks[0][0], false, 'monitor callback prev=false');
     assertEqual(monitorCallbacks[0][1], true, 'monitor callback next=true');
@@ -646,6 +651,32 @@ function makeFakeLoginProxy() {
         true,
         'complete battery reading accepted once DisplayDevice reports WarningLevel'
     );
+
+    // Partially readable adapter set: root OnBattery=false, adapter 1 Online=false,
+    // adapter 2 Online=undefined, DisplayDevice WarningLevel=LOW -> MUST fall back to root AC!
+    watcher._upowerProxy.OnBattery = false;
+    watcher._linePowerDevices.set('/ac0', {
+        proxy: { g_name_owner: ':1.55', Online: false, disconnect() {} },
+        propId: null,
+    });
+    watcher._linePowerDevices.set('/ac1', {
+        proxy: { g_name_owner: ':1.55', Online: undefined, disconnect() {} },
+        propId: null,
+    });
+    const partialAdapters = watcher.getReading();
+    assertEqual(partialAdapters.known, true, 'partial adapter set falls back to live root');
+    assertEqual(partialAdapters.onBattery, false, 'partial adapter set does not fabricate Battery over root AC');
+
+    // One confirmed online adapter establishes AC even while another is unknown
+    watcher._linePowerDevices.get('/ac0').proxy.Online = true;
+    watcher._upowerProxy.OnBattery = true;
+    assertEqual(watcher.getReading().onBattery, false, 'one online adapter establishes AC');
+
+    // All adapters positively offline -> onBattery=true
+    watcher._linePowerDevices.get('/ac0').proxy.Online = false;
+    watcher._linePowerDevices.get('/ac1').proxy.Online = false;
+    assertEqual(watcher.getReading().onBattery, true, 'all adapters confirmed offline establishes Battery');
+
     watcher.destroy();
 })();
 

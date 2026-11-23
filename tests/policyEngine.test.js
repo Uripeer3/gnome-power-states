@@ -10,6 +10,7 @@ import {
     resolveProfileTransition,
     resolveSleepAction,
     shouldTriggerClosedLidActionOnTransition,
+    shouldTriggerClosedLidActionOnUndock,
 } from '../lib/policyEngine.js';
 
 let passed = 0;
@@ -271,6 +272,40 @@ test('shouldTriggerClosedLidActionOnTransition: only escalates on stricter power
         nextLidDecision: suspendDecision,
     });
     assertEqual(openLid.shouldTrigger, false, 'open lid does not trigger');
+});
+
+test('shouldTriggerClosedLidActionOnUndock: never triggers on AC or display-only disconnect; triggers only on deferred undock', () => {
+    const acMonitorOnly = shouldTriggerClosedLidActionOnUndock({
+        lidClosed: true,
+        powerState: 'ac',
+        stateConfig: { lidAction: 'suspend', lidIgnoreExternalMonitor: false },
+        deferredUndockGrace: true,
+    });
+    assertEqual(acMonitorOnly.shouldTrigger, false, 'disconnecting monitor on AC never triggers suspend');
+
+    const batteryDisplayOnly = shouldTriggerClosedLidActionOnUndock({
+        lidClosed: true,
+        powerState: 'battery',
+        stateConfig: { lidAction: 'suspend', lidIgnoreExternalMonitor: false },
+        deferredUndockGrace: false,
+    });
+    assertEqual(batteryDisplayOnly.shouldTrigger, false, 'display-only disconnect without power loss never triggers');
+
+    const unblockedPolicy = shouldTriggerClosedLidActionOnUndock({
+        lidClosed: true,
+        powerState: 'battery',
+        stateConfig: { lidAction: 'suspend', lidIgnoreExternalMonitor: true },
+        deferredUndockGrace: true,
+    });
+    assertEqual(unblockedPolicy.shouldTrigger, false, 'policy not suppressed by monitor does not replay on undock');
+
+    const validUndock = shouldTriggerClosedLidActionOnUndock({
+        lidClosed: true,
+        powerState: 'battery',
+        stateConfig: { lidAction: 'suspend', lidIgnoreExternalMonitor: false },
+        deferredUndockGrace: true,
+    });
+    assertEqual(validUndock.shouldTrigger, true, 'deferred on-battery undock unblocking suspend triggers grace action');
 });
 
 // 5. Sleep mode capability fallback

@@ -24,7 +24,7 @@ check-syntax:
 		if printf '%s\n' "$$out" | grep -qi "SyntaxError"; then \
 			echo "SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
 		fi; \
-		python3 -c 'import pathlib, re, sys; src = pathlib.Path(sys.argv[1]); text = src.read_text(); refs = re.findall(r"(?:from|import)\s*\(?\s*[\"\x27](\.\.?/[^\"\x27]+)[\"\x27]", text, re.S); missing = [r for r in refs if not (src.parent / r).resolve().is_file()]; sys.exit("MISSING LOCAL IMPORT in " + sys.argv[1] + ": " + ", ".join(missing)) if missing else None' "$$f" || exit 1; \
+		python3 -c 'import pathlib, re, sys; src = pathlib.Path(sys.argv[1]); text = src.read_text(); tok_re = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/|(\"(?:\\.|[^\"\\\n])*\"|\x27(?:\\.|[^\x27\\\n])*\x27|`(?:\\.|[^`\\])*`)|([A-Za-z_$$][A-Za-z0-9_$$]*|\(|\S)"); prev2 = prev1 = ""; missing = []; [((prev1 in ("from", "import") or (prev2 == "import" and prev1 == "(")) and m.group(1)[0] != "`" and re.match(r"^\.\.?/", m.group(1)[1:-1]) and not (src.parent / m.group(1)[1:-1]).resolve().is_file() and missing.append(m.group(1)[1:-1])) if m.group(1) else None for m in tok_re.finditer(text) if (m.group(1) or m.group(2)) and (not m.group(2) or ((prev2 := prev1), (prev1 := m.group(2)), True)[-1])]; sys.exit("MISSING LOCAL IMPORT in " + sys.argv[1] + ": " + ", ".join(missing)) if missing else None' "$$f" || exit 1; \
 	done
 	@echo "Libraries loaded; entry-point syntax and single/multiline relative imports verified"
 	glib-compile-schemas --strict --dry-run $(SCHEMA_DIR)

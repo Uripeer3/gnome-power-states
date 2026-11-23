@@ -915,13 +915,29 @@ class PrefsController {
                             'Could not query systemd-logind for supported sleep modes on this system.'
                         );
                     } else if (supportedModes.length === 1) {
-                        this._sleepModeValueLabel.label = _(supportedModes[0].label);
+                        const onlyMode = supportedModes[0];
+                        const missing = [];
+                        if (!this._capabilities.canSuspend)
+                            missing.push(_('Standby (RAM)'));
+                        if (!this._capabilities.canHibernate)
+                            missing.push(_('Hibernate'));
+                        if (!this._capabilities.canHybridSleep)
+                            missing.push(_('Hybrid Sleep'));
+                        if (!this._capabilities.canSuspendThenHibernate)
+                            missing.push(_('Suspend then Hibernate'));
+                        const missingList = missing.join(', ');
+
+                        this._sleepModeValueLabel.label = _(onlyMode.label);
                         this._sleepModeValueLabel.tooltip_text = _(
-                            'Hibernate and Hybrid Sleep are not configured on this system. Click the info button for details.'
-                        );
-                        this._sleepModeInfoLabel.label = _(
-                            'Only Standby (RAM) is currently available on this system.\n\nTo enable Hibernate or Suspend-then-Hibernate, configure a swapfile or swap partition with a kernel resume parameter in systemd.'
-                        );
+                            'Only %s is available on this system. Click the info button for details.'
+                        ).format(_(onlyMode.label));
+                        this._sleepModeInfoLabel.label = !this._capabilities.canHibernate
+                            ? _(
+                                  'Only %s is currently available on this system (unavailable: %s).\n\nTo enable Hibernate or Suspend-then-Hibernate, configure a swapfile or swap partition with a kernel resume parameter in systemd.'
+                              ).format(_(onlyMode.label), missingList)
+                            : _(
+                                  'Only %s is currently available on this system (unavailable: %s).'
+                              ).format(_(onlyMode.label), missingList);
                     } else {
                         this._sleepModeValueLabel.label = _('Unavailable');
                         this._sleepModeValueLabel.tooltip_text = _(
