@@ -17,7 +17,12 @@ import {
 } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { probeLoginSleepCapabilities, probeSystemCapabilities } from './lib/capabilities.js';
-import { SCHEMA_ID, readGlobalConfig, readStateConfig } from './lib/configStore.js';
+import {
+    SCHEMA_ID,
+    readGlobalConfig,
+    readStateConfig,
+    safeGetBoolean,
+} from './lib/configStore.js';
 import { IdleController } from './lib/idleController.js';
 import { LidController } from './lib/lidController.js';
 import {
@@ -95,7 +100,7 @@ export default class PowerStatesExtension extends Extension {
                 this._refreshLoginCapabilities(ownerGen, 0);
             },
             shouldPauseMediaOnSleep: () =>
-                Boolean(this._settings?.get_boolean('pause-media-on-suspend')),
+                safeGetBoolean(this._settings, 'pause-media-on-suspend', true),
             onError: msg => this._notify(msg, true),
         });
 
@@ -621,7 +626,7 @@ export default class PowerStatesExtension extends Extension {
     _notify(message, isError = false) {
         if (this._destroyed)
             return;
-        if (!isError && !this._settings?.get_boolean('notifications'))
+        if (!isError && !safeGetBoolean(this._settings, 'notifications', false))
             return;
         Main.notify(_('Power States'), message);
     }

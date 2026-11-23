@@ -8,6 +8,7 @@
 //   - Failed restore retry + live baseline update from Preferences
 // Run with: gjs -m tests/idleController.test.js
 
+import { DEFAULT_UNPLUG_GRACE_SECONDS, readGlobalConfig } from '../lib/configStore.js';
 import { IdleController, readRecoveryState, updateRecoveryState } from '../lib/idleController.js';
 
 let passed = 0;
@@ -343,6 +344,65 @@ const sampleConfigs = {
     idle.applyForState('ac', sampleConfigs, { stateChanged: true });
     assertEqual(power.get_int('sleep-inactive-battery-timeout'), 2400, 'restores live baseline 2400');
     idle.destroy();
+})();
+
+// 10. Regression: Stale in-memory GSettingsSchema missing new keys after Wayland upgrade
+//     falls back safely instead of calling get_* on a missing key (which aborts gnome-shell!)
+(() => {
+    const staleKeys = new Set([
+        'sleep-mode',
+        'low-battery-mode',
+        'low-battery-percentage',
+        'pause-media-on-suspend',
+        'unplug-while-closed-grace-seconds',
+        'notifications',
+    ]);
+    const staleSettings = {
+        settings_schema: {
+            has_key(key) {
+                return staleKeys.has(key);
+            },
+        },
+        get_string(key) {
+            if (!staleKeys.has(key))
+                throw new Error(`GLib fatal abort: missing key ${key}`);
+            return key === 'sleep-mode' ? 'suspend' : 'upower';
+        },
+        get_int(key) {
+            if (!staleKeys.has(key))
+                throw new Error(`GLib fatal abort: missing key ${key}`);
+            return key === 'low-battery-percentage' ? 20 : 5;
+        },
+        get_boolean(key) {
+            if (!staleKeys.has(key))
+                throw new Error(`GLib fatal abort: missing key ${key}`);
+            return key === 'pause-media-on-suspend';
+        },
+        set_string(key) {
+            if (!staleKeys.has(key))
+                throw new Error(`GLib fatal abort: missing key ${key}`);
+            return true;
+        },
+    };
+
+    const cfg = readGlobalConfig(staleSettings);
+    assertEqual(cfg.unplugWhileClosedMode, 'default', 'stale schema falls back for unplug-while-closed-mode');
+    assertEqual(
+        cfg.unplugWhileClosedGraceSeconds,
+        DEFAULT_UNPLUG_GRACE_SECONDS,
+        'stale schema uses default grace seconds'
+    );
+
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+    const idle = new IdleController(staleSettings, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 300, 'stale schema falls back to in-memory recovery');
+    idle.destroy();
+    assertEqual(session.get_uint('idle-delay'), 600, 'in-memory fallback still restores 600 cleanly');
 })();
 
 if (failed > 0) {

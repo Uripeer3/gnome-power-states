@@ -33,9 +33,11 @@ install: compile-schemas
 	mkdir -p "$(INSTALL_DIR)/lib" "$(INSTALL_DIR)/schemas"
 	cp metadata.json extension.js prefs.js "$(INSTALL_DIR)/"
 	cp lib/*.js "$(INSTALL_DIR)/lib/"
-	cp schemas/*.xml schemas/gschemas.compiled "$(INSTALL_DIR)/schemas/"
+	cp schemas/*.xml "$(INSTALL_DIR)/schemas/"
+	cp schemas/gschemas.compiled "$(INSTALL_DIR)/schemas/gschemas.compiled.tmp"
+	mv -f "$(INSTALL_DIR)/schemas/gschemas.compiled.tmp" "$(INSTALL_DIR)/schemas/gschemas.compiled"
 	@echo "Installed to $(INSTALL_DIR)"
-	@echo "Log out/in (Wayland) if newly installed, then run: gnome-extensions enable $(UUID)"
+	@echo "Log out/in (Wayland) after schema changes so GNOME Shell reloads gschemas.compiled"
 
 uninstall:
 	-gnome-extensions disable $(UUID)
