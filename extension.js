@@ -57,6 +57,7 @@ export default class PowerStatesExtension extends Extension {
 
         this._lastPolicyState = null;
         this._manualOverrideActive = false;
+        this._initialReconcilePending = true;
 
         this._idleController = new IdleController(this._settings);
 
@@ -173,6 +174,7 @@ export default class PowerStatesExtension extends Extension {
 
         this._lastPolicyState = null;
         this._manualOverrideActive = false;
+        this._initialReconcilePending = false;
     }
 
     _readAllStateConfigs() {
@@ -278,6 +280,8 @@ export default class PowerStatesExtension extends Extension {
 
         if (wasConnected && !isConnected && this._lidController.lidClosed) {
             const reading = this._upowerWatcher.getReading();
+            if (!reading || reading.known === false)
+                return;
             const globalConfig = readGlobalConfig(this._settings);
             const currentState = resolvePowerState(reading, globalConfig);
             const stateConfig = readStateConfig(this._settings, currentState);
@@ -315,6 +319,21 @@ export default class PowerStatesExtension extends Extension {
             return;
 
         const globalConfig = readGlobalConfig(this._settings);
+
+        // Defer all state-dependent writes and startup marker clearing until we have
+        // a usable physical power reading (never guess AC during a UPower outage).
+        if (!reading || reading.known === false) {
+            if (this._lidController) {
+                this._lidController.setSleepDelayDesired(globalConfig.pauseMediaOnSuspend);
+                this._lidController.setInhibitDesired(false);
+            }
+            return;
+        }
+
+        const effectiveInitialStartup = isInitialStartup || this._initialReconcilePending;
+        const effectiveForceProfile = forceProfile || this._initialReconcilePending;
+        this._initialReconcilePending = false;
+
         const stateConfigs = this._readAllStateConfigs();
         const nextState = resolvePowerState(reading, globalConfig);
         const previousState = this._lastPolicyState;
@@ -338,7 +357,7 @@ export default class PowerStatesExtension extends Extension {
                     lastPolicyState: previousState,
                     activeProfile: this._profileController.effectiveProfile,
                     manualOverrideActive: this._manualOverrideActive,
-                    force: forceProfile,
+                    force: effectiveForceProfile,
                     stateConfig: activeStateConfig,
                     availableProfiles: this._profileController.availableProfiles,
                 });
@@ -354,7 +373,7 @@ export default class PowerStatesExtension extends Extension {
         // 2. Runtime Idle Override (Low Battery) & Screen Blank
         this._idleController?.applyForState(nextState, stateConfigs, {
             stateChanged,
-            isInitialStartup,
+            isInitialStartup: effectiveInitialStartup,
             forceLowBattery,
             forceIdleDelay,
         });
@@ -417,6 +436,8 @@ export default class PowerStatesExtension extends Extension {
         }
 
         const reading = this._upowerWatcher.getReading();
+        if (!reading || reading.known === false)
+            return;
         const globalConfig = readGlobalConfig(this._settings);
         const currentState = resolvePowerState(reading, globalConfig);
 

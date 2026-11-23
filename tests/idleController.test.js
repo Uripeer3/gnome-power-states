@@ -154,7 +154,7 @@ const sampleConfigs = {
     assertEqual(session.get_uint('idle-delay'), 300, 'first override applied 300');
 
     // Simulate interruption right AFTER preparing second journal (pending=60) BEFORE native write
-    idle1._prepareIdleDelayJournal(600, 60, true);
+    idle1._idleJournal.prepare(600, 60, true, 300);
     power.simulateProcessCrash();
     session.simulateProcessCrash();
     // Native key is still 300!
@@ -273,7 +273,8 @@ const sampleConfigs = {
     assertEqual(ext.get_boolean('recovery-low-bat-active'), false, 'legacy marker cleared once restored');
 })();
 
-// 3e. Regression: User edit while extension is running survives same-state disable + re-enable!
+// 3e. Regression: User edit while extension is running survives same-state disable + re-enable,
+//     AND an offline Preferences edit clearing relinquishment takes effect on next enable!
 (() => {
     const ext = makeDefaultExtSettings();
     const power = makeFakeSettings({
@@ -294,6 +295,80 @@ const sampleConfigs = {
     const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     idle2.applyForState('battery', sampleConfigs, { isInitialStartup: true });
     assertEqual(session.get_uint('idle-delay'), 480, 'same-state disable/enable preserves user edit 480');
+    idle2.destroy();
+
+    // Now simulate an offline Preferences edit to Battery Screen Blank while disabled:
+    // prefs.js clears matching relinquishment marker and writes new value (900).
+    ext.set_string('recovery-idle-delay-relinquished-state', '');
+    const updatedConfigs = {
+        ...sampleConfigs,
+        battery: { ...sampleConfigs.battery, screenBlank: 900 },
+    };
+    const idle3 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle3.applyForState('battery', updatedConfigs, { isInitialStartup: true });
+    assertEqual(session.get_uint('idle-delay'), 900, 'offline Preferences edit applies on next enable');
+    idle3.destroy();
+    assertEqual(session.get_uint('idle-delay'), 480, 'restores 480 baseline on disable');
+})();
+
+// 3f. Regression: Second write after locked `applied` commit MUST NOT destroy recovery record!
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'nothing',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 300, 'battery applied 300');
+
+    // Lock applied key, then apply Low Battery (60) -> pending=60 is the only record
+    ext.setWritable('recovery-idle-delay-applied', false);
+    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 60, 'low-battery applied 60');
+    assertEqual(ext.get_int('recovery-idle-delay-pending'), 60, 'pending=60 retained');
+
+    // Next Battery transition attempts to write 300 while native write also fails:
+    // prepare MUST refuse to overwrite pending=60 while applied cannot commit 60!
+    session.setWritable('idle-delay', false);
+    idle.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(ext.get_int('recovery-idle-delay-pending'), 60, 'second write did not clobber pending=60');
+
+    // Unlock native key and destroy -> MUST restore original 600 and clear recovery flag!
+    session.setWritable('idle-delay', true);
+    idle.destroy();
+    assertEqual(session.get_uint('idle-delay'), 600, 'destroy still restores original 600 after second write');
+    assertEqual(ext.get_boolean('recovery-idle-delay-active'), false, 'recovery flag cleared after restore');
+})();
+
+// 3g. Regression: Locked relinquishment key retains mismatched journal as tombstone across restart!
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle1 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle1.applyForState('battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 300, 'battery applied 300');
+
+    // Lock relinquishment key, then user edits idle-delay externally to 480
+    ext.setWritable('recovery-idle-delay-relinquished-state', false);
+    session.set_uint('idle-delay', 480);
+    assertEqual(ext.get_boolean('recovery-idle-delay-active'), true, 'journal retained as tombstone when marker locked');
+
+    idle1.destroy();
+    assertEqual(session.get_uint('idle-delay'), 480, 'destroy does not overwrite user edit 480');
+    assertEqual(ext.get_boolean('recovery-idle-delay-active'), true, 'tombstone survives destroy while marker locked');
+
+    // Fresh controller on same state MUST still preserve 480!
+    const idle2 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle2.applyForState('battery', sampleConfigs, { isInitialStartup: true });
+    assertEqual(session.get_uint('idle-delay'), 480, 'fresh controller preserves 480 via tombstone');
     idle2.destroy();
 })();
 

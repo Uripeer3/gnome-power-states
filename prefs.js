@@ -472,8 +472,14 @@ class PrefsController {
             if (this._syncingUi)
                 return;
             const choice = SCREEN_BLANK_OPTIONS[this._screenBlankRow.selected];
-            if (choice)
+            if (choice) {
+                // Clear any saved relinquishment for this state (or wildcard '*') so
+                // edits made while the extension is disabled take effect on next enable.
+                const relState = this._settings.get_string('recovery-idle-delay-relinquished-state');
+                if (relState === this._selectedState || relState === '*')
+                    this._settings.set_string('recovery-idle-delay-relinquished-state', '');
                 this._settings.set_int(`${this._selectedState}-screen-blank`, choice.value);
+            }
         });
         stateList.append(this._screenBlankRow);
 
@@ -766,6 +772,12 @@ class PrefsController {
                         this._settings.set_int(`${stateKey}-idle-timeout`, timeoutValue);
                 }
             } else {
+                // Clear saved low-battery relinquishment markers so edits made while
+                // the extension is disabled take effect on the next enable.
+                if (this._settings.get_boolean('recovery-low-bat-type-relinquished'))
+                    this._settings.set_boolean('recovery-low-bat-type-relinquished', false);
+                if (this._settings.get_boolean('recovery-low-bat-timeout-relinquished'))
+                    this._settings.set_boolean('recovery-low-bat-timeout-relinquished', false);
                 this._settings.set_string('low-battery-idle-action', actionId);
                 if (delayActive)
                     this._settings.set_int('low-battery-idle-timeout', timeoutValue);

@@ -17,6 +17,7 @@ import GLib from 'gi://GLib';
 import { LidController } from '../lib/lidController.js';
 import { resolveProfileTransition } from '../lib/policyEngine.js';
 import { ProfileController } from '../lib/profileController.js';
+import { UPowerWatcher } from '../lib/upowerWatcher.js';
 
 let passed = 0;
 let failed = 0;
@@ -244,35 +245,61 @@ function makeFakeLoginProxy() {
     assertEqual(sleepFdClosed, true, 'fast switch closes sleep-delay FD');
 
     // Failed canonical session resolution through the REAL _resolveCanonicalSessionPath()
-    // when all 3 lookups fail or return non-canonical '/session/auto' must return null
-    // and leave _sessionProxy === null & sessionActive === false (fail-closed, zero FDs).
+    // when all 3 lookups fail or return non-canonical '/session/auto' must exercise ALL 3
+    // lookups, return null, leave _sessionProxy === null & sessionActive === false,
+    // and refuse BOTH lid and sleep-delay inhibitor acquisition.
+    const prevXdgSessionId = GLib.getenv('XDG_SESSION_ID');
+    let getSessionCalls = 0;
+    let getSessionByPidCalls = 0;
+    let userDisplayCalls = 0;
     const lidFail = new LidController({
         inhibitTransport: () => {
             transportCalls++;
         },
-        userDisplayLookup: async () => ['', '/org/freedesktop/login1/session/auto'],
+        userDisplayLookup: async () => {
+            userDisplayCalls++;
+            return ['', '/org/freedesktop/login1/session/auto'];
+        },
     });
     lidFail._loginProxy = {
         g_name_owner: ':1.1',
-        GetSessionRemote(_id, cb) { cb(['/org/freedesktop/login1/session/auto'], null); },
-        GetSessionByPIDRemote(_pid, cb) { cb(null, new Error('No session for PID')); },
+        GetSessionRemote(_id, cb) {
+            getSessionCalls++;
+            cb(['/org/freedesktop/login1/session/auto'], null);
+        },
+        GetSessionByPIDRemote(_pid, cb) {
+            getSessionByPidCalls++;
+            cb(null, new Error('No session for PID'));
+        },
         disconnect() {},
         disconnectSignal() {},
     };
-    let resolvedFail = 'unset';
-    lidFail._resolveCanonicalSessionPath().then(p => {
-        resolvedFail = p;
-    });
-    drainMicrotasks();
-    assertEqual(resolvedFail, null, 'real resolver rejects /session/auto and returns null');
+    try {
+        GLib.setenv('XDG_SESSION_ID', 'test-session-42', true);
+        let resolvedFail = 'unset';
+        lidFail._resolveCanonicalSessionPath().then(p => {
+            resolvedFail = p;
+        });
+        drainMicrotasks();
+        assertEqual(getSessionCalls, 1, 'real resolver tried GetSession(XDG_SESSION_ID)');
+        assertEqual(getSessionByPidCalls, 1, 'real resolver tried GetSessionByPID(0)');
+        assertEqual(userDisplayCalls, 1, 'real resolver tried User.Display');
+        assertEqual(resolvedFail, null, 'real resolver rejects /session/auto and returns null');
 
-    lidFail._attachCanonicalSessionProxy();
-    drainMicrotasks();
-    assertEqual(lidFail._sessionProxy, null, 'failed attach leaves _sessionProxy null');
-    assertEqual(lidFail.sessionActive, false, 'failed attach stays inactive');
-    lidFail.setInhibitDesired(true, 'Should stay blocked');
-    assertEqual(transportCalls, 0, 'failed attach refuses FD acquisition');
-    lidFail.destroy();
+        lidFail._attachCanonicalSessionProxy();
+        drainMicrotasks();
+        assertEqual(lidFail._sessionProxy, null, 'failed attach leaves _sessionProxy null');
+        assertEqual(lidFail.sessionActive, false, 'failed attach stays inactive');
+        lidFail.setInhibitDesired(true, 'Should stay blocked');
+        lidFail.setSleepDelayDesired(true);
+        assertEqual(transportCalls, 0, 'failed attach refuses both lid and sleep-delay FDs');
+    } finally {
+        if (prevXdgSessionId !== null)
+            GLib.setenv('XDG_SESSION_ID', prevXdgSessionId, true);
+        else
+            GLib.unsetenv('XDG_SESSION_ID');
+        lidFail.destroy();
+    }
 
     // Also test executeAction gating (missing FD, open lid, stale generation, valid)
     const fakeLogin = makeFakeLoginProxy();
@@ -533,7 +560,62 @@ function makeFakeLoginProxy() {
     );
     assertEqual(prof._lapDebounceId !== null, true, 'lap-detected Variant schedules retry timer');
 
+    // Regression: Combined PropertiesChanged (ActiveProfile + PerformanceDegraded: '')
+    // MUST still consume the expected echo so later manual selections are never misclassified!
+    const extBefore = externalChanges;
+    const appBefore = applied.length;
+    prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
+    legacyEntry.proxy.ActiveProfile = 'performance';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({
+            ActiveProfile: new GLib.Variant('s', 'performance'),
+            PerformanceDegraded: new GLib.Variant('s', ''),
+        })
+    );
+    dbusCalls[5].done(null);
+    assertEqual(applied.length, appBefore + 1, 'combined signal consumed extension echo once');
+
+    // Now simulate two manual Quick Settings selections: balanced then performance
+    legacyEntry.proxy.ActiveProfile = 'balanced';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'balanced') })
+    );
+    legacyEntry.proxy.ActiveProfile = 'performance';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'performance') })
+    );
+    assertEqual(externalChanges, extBefore + 2, 'both subsequent manual selections recognized as external');
+    assertEqual(applied.length, appBefore + 1, 'no stale expected echo misclassified manual performance');
+
+    // Genuine lap-detected downgrade in combined signal does NOT trigger manual override
+    legacyEntry.proxy.ActiveProfile = 'balanced';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({
+            ActiveProfile: new GLib.Variant('s', 'balanced'),
+            PerformanceDegraded: new GLib.Variant('s', 'lap-detected'),
+        })
+    );
+    assertEqual(externalChanges, extBefore + 2, 'lap-detected downgrade is not treated as manual override');
+
     prof.destroy();
+})();
+
+// 10. Regression: UPowerWatcher reports known=false when UPower has no usable live data
+(() => {
+    const watcher = new UPowerWatcher(() => {});
+    assertEqual(watcher.getReading().known, false, 'no UPower proxies -> reading.known is false');
+
+    // Dead proxy (g_name_owner: null) with stale cached OnBattery=false -> STILL known=false!
+    watcher._upowerProxy = { g_name_owner: null, OnBattery: false, disconnect() {}, disconnectSignal() {} };
+    assertEqual(watcher.getReading().known, false, 'disconnected UPower proxy -> reading.known is false');
+
+    // Live proxy reporting OnBattery=true -> known=true, onBattery=true!
+    watcher._upowerProxy.g_name_owner = ':1.55';
+    watcher._upowerProxy.OnBattery = true;
+    const liveReading = watcher.getReading();
+    assertEqual(liveReading.known, true, 'live UPower proxy -> reading.known is true');
+    assertEqual(liveReading.onBattery, true, 'live UPower proxy reports true onBattery');
+    watcher.destroy();
 })();
 
 if (failed > 0) {

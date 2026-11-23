@@ -19,12 +19,12 @@ check-syntax:
 	@for f in lib/*.js; do \
 		out="$$(gjs -m "$$f" 2>&1)" || { echo "LOAD/SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; }; \
 	done
-	@for f in extension.js prefs.js; do \
+	@set -e; for f in extension.js prefs.js; do \
 		out="$$(gjs -m "$$f" 2>&1 || true)"; \
 		if printf '%s\n' "$$out" | grep -qi "SyntaxError"; then \
 			echo "SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
 		fi; \
-		python3 -c 'import pathlib, re, sys; text = pathlib.Path(sys.argv[1]).read_text(); refs = re.findall(r"(?:from|import)\s*\(?\s*[\"\x27](\./[^\"\x27]+)[\"\x27]", text, re.S); missing = [r for r in refs if not pathlib.Path(r).is_file()]; sys.exit("MISSING LOCAL IMPORT in " + sys.argv[1] + ": " + ", ".join(missing)) if missing else None' "$$f"; \
+		python3 -c 'import pathlib, re, sys; text = pathlib.Path(sys.argv[1]).read_text(); refs = re.findall(r"(?:from|import)\s*\(?\s*[\"\x27](\./[^\"\x27]+)[\"\x27]", text, re.S); missing = [r for r in refs if not pathlib.Path(r).is_file()]; sys.exit("MISSING LOCAL IMPORT in " + sys.argv[1] + ": " + ", ".join(missing)) if missing else None' "$$f" || exit 1; \
 	done
 	@echo "Libraries loaded; entry-point syntax and single/multiline relative imports verified"
 	glib-compile-schemas --strict --dry-run $(SCHEMA_DIR)
