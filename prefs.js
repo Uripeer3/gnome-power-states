@@ -207,7 +207,7 @@ function buildTimeoutChoices(currentSeconds) {
     const list = BASE_IDLE_TIMEOUT_OPTIONS.map(o => ({ value: o.value, label: _(o.label) }));
     if (
         typeof currentSeconds === 'number' &&
-        currentSeconds >= 60 &&
+        currentSeconds > 0 &&
         !list.some(o => o.value === currentSeconds)
     ) {
         list.push({ value: currentSeconds, label: formatDurationLabel(currentSeconds) });
@@ -441,7 +441,7 @@ class PrefsController {
         setAccessibleLabel(this._idleActionDropDown, _('Automatic Suspend Action'));
         this._idleActionDropDown.connect('notify::selected', () => {
             if (!this._syncingUi)
-                this._commitIdleControls();
+                this._commitIdleControls('action');
         });
 
         this._idleTimeoutDropDown = new Gtk.DropDown({
@@ -451,7 +451,7 @@ class PrefsController {
         setAccessibleLabel(this._idleTimeoutDropDown, _('Automatic Suspend Delay'));
         this._idleTimeoutDropDown.connect('notify::selected', () => {
             if (!this._syncingUi)
-                this._commitIdleControls();
+                this._commitIdleControls('timeout');
         });
 
         idleControlBox.append(this._idleActionDropDown);
@@ -716,7 +716,7 @@ class PrefsController {
      * before writing either key, then deferring the UI refresh to idle so GTK4
      * finishes tearing down the Gtk.DropDown popover cleanly (prevents crashes).
      */
-    _commitIdleControls() {
+    _commitIdleControls(editedField = 'both') {
         const stateKey = this._selectedState;
         const actionChoice = this._idleActionChoices[this._idleActionDropDown.selected];
         const timeoutChoice = this._idleTimeoutChoices[this._idleTimeoutDropDown.selected];
@@ -745,30 +745,46 @@ class PrefsController {
                         ? 'sleep-inactive-ac-timeout'
                         : 'sleep-inactive-battery-timeout';
 
+                const existingTimeout = lowBatTimeoutOwned
+                    ? recovery.lowBatTimeout.baseline
+                    : (this._gnomePowerSettings?.get_int(timeoutKey) ?? timeoutValue);
+
+                const writeAction = editedField !== 'timeout';
+                // Preserve untouched positive native/baseline delays (including >14400s or <60s)
+                // when only the action dropdown changed; only write delay when edited or <= 0.
+                const writeTimeout =
+                    delayActive && (editedField !== 'action' || existingTimeout <= 0);
+
                 // Per-key handling: while Low Battery owns a battery key, leave recovery-state
                 // strictly single-writer owned by extension.js (writing battery-idle-* below
                 // triggers syncExplicitNativeAutoSuspend in extension.js to update the baseline).
-                if (!lowBatTypeOwned && this._gnomePowerSettings?.is_writable(typeKey))
+                if (writeAction && !lowBatTypeOwned && this._gnomePowerSettings?.is_writable(typeKey))
                     this._gnomePowerSettings.set_string(typeKey, actionId);
 
-                if (delayActive && !lowBatTimeoutOwned && this._gnomePowerSettings?.is_writable(timeoutKey))
+                if (
+                    writeTimeout &&
+                    !lowBatTimeoutOwned &&
+                    this._gnomePowerSettings?.is_writable(timeoutKey)
+                ) {
                     this._gnomePowerSettings.set_int(timeoutKey, timeoutValue);
+                }
 
                 if (actionId === 'nothing' || actionId === 'suspend' || actionId === 'hibernate') {
-                    const extActionKey = `${stateKey}-idle-action`;
-                    // If Low Battery currently owns the native key and the extension key
-                    // already holds `actionId` (e.g. native was edited to a non-enum value
-                    // like 'blank'), nudge through another enum value so GSettings emits
-                    // `changed` and extension.js updates recovery-state's baseline.
-                    if (lowBatTypeOwned && this._settings.get_string(extActionKey) === actionId) {
-                        this._settings.set_string(
-                            extActionKey,
-                            actionId === 'nothing' ? 'suspend' : 'nothing'
-                        );
+                    if (writeAction) {
+                        const extActionKey = `${stateKey}-idle-action`;
+                        if (
+                            lowBatTypeOwned &&
+                            this._settings.get_string(extActionKey) === actionId
+                        ) {
+                            this._settings.set_string(
+                                extActionKey,
+                                actionId === 'nothing' ? 'suspend' : 'nothing'
+                            );
+                        }
+                        this._settings.set_string(extActionKey, actionId);
                     }
-                    this._settings.set_string(extActionKey, actionId);
 
-                    if (delayActive) {
+                    if (writeTimeout && timeoutValue >= 1 && timeoutValue <= 86400) {
                         const extTimeoutKey = `${stateKey}-idle-timeout`;
                         if (
                             lowBatTimeoutOwned &&
@@ -776,15 +792,16 @@ class PrefsController {
                         ) {
                             this._settings.set_int(
                                 extTimeoutKey,
-                                timeoutValue > 60 ? timeoutValue - 1 : timeoutValue + 1
+                                timeoutValue > 1 ? timeoutValue - 1 : timeoutValue + 1
                             );
                         }
                         this._settings.set_int(extTimeoutKey, timeoutValue);
                     }
                 }
             } else {
-                this._settings.set_string('low-battery-idle-action', actionId);
-                if (delayActive)
+                if (editedField !== 'timeout')
+                    this._settings.set_string('low-battery-idle-action', actionId);
+                if (delayActive && editedField !== 'action' && timeoutValue >= 1 && timeoutValue <= 86400)
                     this._settings.set_int('low-battery-idle-timeout', timeoutValue);
             }
         } finally {

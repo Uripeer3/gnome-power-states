@@ -46,7 +46,7 @@
     </key>
 
     <key name="ac-idle-timeout" type="i">
-      <range min="60" max="14400"/>
+      <range min="1" max="86400"/>
       <default>1800</default>
       <summary>Automatic suspend delay when plugged in (seconds)</summary>
       <description>Synced directly to org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout.</description>
@@ -104,7 +104,7 @@
     </key>
 
     <key name="battery-idle-timeout" type="i">
-      <range min="60" max="14400"/>
+      <range min="1" max="86400"/>
       <default>900</default>
       <summary>Automatic suspend delay on battery (seconds)</summary>
       <description>Synced directly to org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout.</description>
@@ -162,7 +162,7 @@
     </key>
 
     <key name="low-battery-idle-timeout" type="i">
-      <range min="60" max="14400"/>
+      <range min="1" max="86400"/>
       <default>300</default>
       <summary>Automatic suspend delay on low battery (seconds)</summary>
       <description>Temporarily applied to sleep-inactive-battery-timeout while in low battery state.</description>

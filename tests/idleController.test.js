@@ -492,6 +492,45 @@ const sampleConfigs = {
     idle.destroy();
 })();
 
+// 13. Regression: Action-only Battery edit while Low Battery owns keys preserves an untouched
+//     5-hour (18000s) or sub-minute (30s) native timeout baseline instead of overwriting with 900s!
+(() => {
+    for (const nativeTimeout of [18000, 30]) {
+        const ext = makeFakeSettings({
+            'recovery-state': '{}',
+            'battery-idle-action': 'suspend',
+            'battery-idle-timeout': 900,
+        });
+        const power = makeFakeSettings({
+            'sleep-inactive-battery-type': 'blank',
+            'sleep-inactive-battery-timeout': nativeTimeout,
+        });
+        const session = makeFakeSettings({ 'idle-delay': 600 });
+
+        const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+        idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+
+        // User changes ONLY the Battery action to 'suspend' (stale ext timeout is 900)
+        idle.syncExplicitNativeAutoSuspend(
+            'battery',
+            { idleAction: 'suspend', idleTimeout: 900 },
+            'action'
+        );
+
+        idle.destroy();
+        assertEqual(
+            power.get_string('sleep-inactive-battery-type'),
+            'suspend',
+            `action-only edit restored suspend (timeout=${nativeTimeout})`
+        );
+        assertEqual(
+            power.get_int('sleep-inactive-battery-timeout'),
+            nativeTimeout,
+            `action-only edit preserved untouched ${nativeTimeout}s timeout baseline`
+        );
+    }
+})();
+
 if (failed > 0) {
     console.error(`\n${failed} test(s) failed, ${passed} passed.`);
     imports.system.exit(1);

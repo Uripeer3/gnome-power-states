@@ -321,12 +321,14 @@ export default class PowerStatesExtension extends Extension {
         if (key === 'ac-idle-action' || key === 'ac-idle-timeout') {
             this._idleController?.syncExplicitNativeAutoSuspend(
                 'ac',
-                readStateConfig(this._settings, 'ac')
+                readStateConfig(this._settings, 'ac'),
+                key === 'ac-idle-action' ? 'action' : 'timeout'
             );
         } else if (key === 'battery-idle-action' || key === 'battery-idle-timeout') {
             this._idleController?.syncExplicitNativeAutoSuspend(
                 'battery',
-                readStateConfig(this._settings, 'battery')
+                readStateConfig(this._settings, 'battery'),
+                key === 'battery-idle-action' ? 'action' : 'timeout'
             );
         }
 
@@ -597,7 +599,18 @@ export default class PowerStatesExtension extends Extension {
                         (previousState === 'ac' &&
                             (nextState === 'battery' || nextState === 'low-battery')) ||
                         (previousState === 'battery' && nextState === 'low-battery');
-                    if (
+                    const isStillDockedBatteryShift =
+                        ((previousState === 'low-battery' && nextState === 'battery') ||
+                            (previousState === 'battery' && nextState === 'low-battery')) &&
+                        this._deferredUndockGrace &&
+                        GLib.get_monotonic_time() <= this._deferredUndockDeadlineUs &&
+                        this._lidController.lidClosed &&
+                        lidDecision.blockedByExternalMonitor;
+
+                    if (isStillDockedBatteryShift) {
+                        // Preserve the existing monotonic undock deadline across a still-docked
+                        // low-battery <-> battery shift while the monitor still blocks the action.
+                    } else if (
                         isPowerLossTransition &&
                         this._lidController.lidClosed &&
                         lidDecision.blockedByExternalMonitor
