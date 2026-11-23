@@ -233,85 +233,10 @@
       <description>Display transient GNOME notifications when Power States switches modes or encounters a backend issue.</description>
     </key>
 
-    <!-- Internal crash-recovery WAL journal keys (not shown in Preferences) -->
-    <key name="recovery-idle-delay-active" type="b">
-      <default>false</default>
-      <summary>Internal: whether Power States holds a recoverable idle-delay override</summary>
-    </key>
-
-    <key name="recovery-idle-delay-baseline" type="u">
-      <default>300</default>
-      <summary>Internal: user idle-delay value saved before extension override</summary>
-    </key>
-
-    <key name="recovery-idle-delay-applied" type="u">
-      <default>300</default>
-      <summary>Internal: last confirmed idle-delay value written by extension</summary>
-    </key>
-
-    <key name="recovery-idle-delay-pending" type="i">
-      <default>-1</default>
-      <summary>Internal: in-flight idle-delay write target (-1 when no write is pending)</summary>
-    </key>
-
-    <key name="recovery-idle-delay-relinquished-state" type="s">
-      <default>''</default>
-      <summary>Internal: power state in which an external GNOME Settings idle-delay edit took ownership</summary>
-    </key>
-
-    <key name="recovery-low-bat-active" type="b">
-      <default>false</default>
-      <summary>Internal (legacy migration): pre-per-key Low Battery recovery flag</summary>
-    </key>
-
-    <key name="recovery-low-bat-type-active" type="b">
-      <default>false</default>
-      <summary>Internal: whether Power States owns a temporary Low Battery sleep-inactive-battery-type override</summary>
-    </key>
-
-    <key name="recovery-low-bat-timeout-active" type="b">
-      <default>false</default>
-      <summary>Internal: whether Power States owns a temporary Low Battery sleep-inactive-battery-timeout override</summary>
-    </key>
-
-    <key name="recovery-low-bat-baseline-type" type="s">
-      <default>''</default>
-      <summary>Internal: normal battery sleep-inactive-battery-type saved before Low Battery override</summary>
-    </key>
-
-    <key name="recovery-low-bat-baseline-timeout" type="i">
-      <default>900</default>
-      <summary>Internal: normal battery sleep-inactive-battery-timeout saved before Low Battery override</summary>
-    </key>
-
-    <key name="recovery-low-bat-applied-type" type="s">
-      <default>''</default>
-      <summary>Internal: last confirmed Low Battery sleep-inactive-battery-type written by extension</summary>
-    </key>
-
-    <key name="recovery-low-bat-applied-timeout" type="i">
-      <default>300</default>
-      <summary>Internal: last confirmed Low Battery sleep-inactive-battery-timeout written by extension</summary>
-    </key>
-
-    <key name="recovery-low-bat-pending-type" type="s">
-      <default>''</default>
-      <summary>Internal: in-flight Low Battery sleep-inactive-battery-type target (empty when none)</summary>
-    </key>
-
-    <key name="recovery-low-bat-pending-timeout" type="i">
-      <default>-1</default>
-      <summary>Internal: in-flight Low Battery sleep-inactive-battery-timeout target (-1 when none)</summary>
-    </key>
-
-    <key name="recovery-low-bat-type-relinquished" type="b">
-      <default>false</default>
-      <summary>Internal: whether an external edit took ownership of sleep-inactive-battery-type while in Low Battery</summary>
-    </key>
-
-    <key name="recovery-low-bat-timeout-relinquished" type="b">
-      <default>false</default>
-      <summary>Internal: whether an external edit took ownership of sleep-inactive-battery-timeout while in Low Battery</summary>
+    <!-- Internal atomic crash-recovery & edit-relinquishment journal (JSON) -->
+    <key name="recovery-state" type="s">
+      <default>'{}'</default>
+      <summary>Internal: atomic JSON recovery journal for managed native GNOME settings</summary>
     </key>
   </schema>
 </schemalist>

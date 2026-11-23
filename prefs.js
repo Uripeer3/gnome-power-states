@@ -26,6 +26,7 @@ import {
     readGlobalConfig,
     readStateConfig,
 } from './lib/configStore.js';
+import { readRecoveryState, updateRecoveryState } from './lib/idleController.js';
 import { detectPolicyConflicts } from './lib/policyEngine.js';
 import { readUPowerPercentageLow } from './lib/upowerConfig.js';
 
@@ -475,9 +476,14 @@ class PrefsController {
             if (choice) {
                 // Clear any saved relinquishment for this state (or wildcard '*') so
                 // edits made while the extension is disabled take effect on next enable.
-                const relState = this._settings.get_string('recovery-idle-delay-relinquished-state');
-                if (relState === this._selectedState || relState === '*')
-                    this._settings.set_string('recovery-idle-delay-relinquished-state', '');
+                updateRecoveryState(this._settings, state => {
+                    if (
+                        state.idleRelinquished === this._selectedState ||
+                        state.idleRelinquished === '*'
+                    ) {
+                        delete state.idleRelinquished;
+                    }
+                });
                 this._settings.set_int(`${this._selectedState}-screen-blank`, choice.value);
             }
         });
@@ -735,12 +741,9 @@ class PrefsController {
         this._syncingUi = true;
         try {
             if (stateKey === 'ac' || stateKey === 'battery') {
-                const lowBatTypeOwned =
-                    stateKey === 'battery' &&
-                    this._settings.get_boolean('recovery-low-bat-type-active');
-                const lowBatTimeoutOwned =
-                    stateKey === 'battery' &&
-                    this._settings.get_boolean('recovery-low-bat-timeout-active');
+                const recovery = stateKey === 'battery' ? readRecoveryState(this._settings) : {};
+                const lowBatTypeOwned = Boolean(recovery.lowBatType);
+                const lowBatTimeoutOwned = Boolean(recovery.lowBatTimeout);
 
                 const typeKey =
                     stateKey === 'ac' ? 'sleep-inactive-ac-type' : 'sleep-inactive-battery-type';
@@ -752,19 +755,20 @@ class PrefsController {
                 // Per-key handling: if Low Battery currently owns a battery key,
                 // update its authoritative recovery baseline instead of clobbering
                 // the active Low Battery override.
-                if (lowBatTypeOwned) {
-                    this._settings.set_string('recovery-low-bat-baseline-type', actionId);
-                } else if (this._gnomePowerSettings?.is_writable(typeKey)) {
-                    this._gnomePowerSettings.set_string(typeKey, actionId);
+                if (lowBatTypeOwned || (delayActive && lowBatTimeoutOwned)) {
+                    updateRecoveryState(this._settings, state => {
+                        if (state.lowBatType)
+                            state.lowBatType.baseline = actionId;
+                        if (delayActive && state.lowBatTimeout)
+                            state.lowBatTimeout.baseline = timeoutValue;
+                    });
                 }
 
-                if (delayActive) {
-                    if (lowBatTimeoutOwned) {
-                        this._settings.set_int('recovery-low-bat-baseline-timeout', timeoutValue);
-                    } else if (this._gnomePowerSettings?.is_writable(timeoutKey)) {
-                        this._gnomePowerSettings.set_int(timeoutKey, timeoutValue);
-                    }
-                }
+                if (!lowBatTypeOwned && this._gnomePowerSettings?.is_writable(typeKey))
+                    this._gnomePowerSettings.set_string(typeKey, actionId);
+
+                if (delayActive && !lowBatTimeoutOwned && this._gnomePowerSettings?.is_writable(timeoutKey))
+                    this._gnomePowerSettings.set_int(timeoutKey, timeoutValue);
 
                 if (actionId === 'nothing' || actionId === 'suspend' || actionId === 'hibernate') {
                     this._settings.set_string(`${stateKey}-idle-action`, actionId);
@@ -774,10 +778,10 @@ class PrefsController {
             } else {
                 // Clear saved low-battery relinquishment markers so edits made while
                 // the extension is disabled take effect on the next enable.
-                if (this._settings.get_boolean('recovery-low-bat-type-relinquished'))
-                    this._settings.set_boolean('recovery-low-bat-type-relinquished', false);
-                if (this._settings.get_boolean('recovery-low-bat-timeout-relinquished'))
-                    this._settings.set_boolean('recovery-low-bat-timeout-relinquished', false);
+                updateRecoveryState(this._settings, state => {
+                    delete state.lowBatTypeRelinquished;
+                    delete state.lowBatTimeoutRelinquished;
+                });
                 this._settings.set_string('low-battery-idle-action', actionId);
                 if (delayActive)
                     this._settings.set_int('low-battery-idle-timeout', timeoutValue);
@@ -974,13 +978,11 @@ class PrefsController {
 
             // Per-key baseline readout while Low Battery temporarily owns either battery key
             if (stateKey === 'battery') {
-                if (this._settings.get_boolean('recovery-low-bat-type-active')) {
-                    const baseType = this._settings.get_string('recovery-low-bat-baseline-type');
-                    if (baseType)
-                        rawAction = baseType;
-                }
-                if (this._settings.get_boolean('recovery-low-bat-timeout-active'))
-                    rawTimeout = this._settings.get_int('recovery-low-bat-baseline-timeout');
+                const recovery = readRecoveryState(this._settings);
+                if (recovery.lowBatType?.baseline)
+                    rawAction = recovery.lowBatType.baseline;
+                if (typeof recovery.lowBatTimeout?.baseline === 'number')
+                    rawTimeout = recovery.lowBatTimeout.baseline;
             }
 
             if (rawTimeout === 0 && (rawAction === 'suspend' || rawAction === 'hibernate')) {
