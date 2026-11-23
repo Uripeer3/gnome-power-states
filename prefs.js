@@ -134,6 +134,25 @@ const SLEEP_MODE_OPTIONS = [
     },
 ];
 
+function createSuffixBox(...children) {
+    const box = new Gtk.Box({
+        orientation: Gtk.Orientation.HORIZONTAL,
+        spacing: 6,
+        valign: Gtk.Align.CENTER,
+    });
+    for (const child of children)
+        box.append(child);
+    return box;
+}
+
+function nativePowerKeys(stateKey) {
+    const suffix = stateKey === 'ac' ? 'ac' : 'battery';
+    return {
+        typeKey: `sleep-inactive-${suffix}-type`,
+        timeoutKey: `sleep-inactive-${suffix}-timeout`,
+    };
+}
+
 function setAccessibleLabel(widget, label) {
     if (typeof widget.update_property === 'function')
         widget.update_property([Gtk.AccessibleProperty.LABEL], [label]);
@@ -419,20 +438,12 @@ class PrefsController {
             subtitle: _('Put the computer to sleep after inactivity'),
         });
 
-        const idleControlBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 6,
-            valign: Gtk.Align.CENTER,
-        });
-
-        idleControlBox.append(
-            createInfoButton(
-                _('How Automatic Suspend works'),
-                _(
-                    'Plugged In and On Battery settings are synced directly with GNOME Settings (org.gnome.settings-daemon.plugins.power).\n\nLow Battery applies a temporary override while battery is low and restores your Battery setting when charging resumes.'
-                )
-            ).button
-        );
+        const idleInfoBtn = createInfoButton(
+            _('How Automatic Suspend works'),
+            _(
+                'Plugged In and On Battery settings are synced directly with GNOME Settings (org.gnome.settings-daemon.plugins.power).\n\nLow Battery applies a temporary override while battery is low and restores your Battery setting when charging resumes.'
+            )
+        ).button;
 
         this._idleActionDropDown = new Gtk.DropDown({
             model: Gtk.StringList.new(this._idleActionChoices.map(o => _(o.label))),
@@ -454,9 +465,9 @@ class PrefsController {
                 this._commitIdleControls('timeout');
         });
 
-        idleControlBox.append(this._idleActionDropDown);
-        idleControlBox.append(this._idleTimeoutDropDown);
-        this._idleRow.add_suffix(idleControlBox);
+        this._idleRow.add_suffix(
+            createSuffixBox(idleInfoBtn, this._idleActionDropDown, this._idleTimeoutDropDown)
+        );
         stateList.append(this._idleRow);
 
         // 5. Screen Blank
@@ -532,11 +543,6 @@ class PrefsController {
         );
         this._sleepModeInfoLabel = sleepInfo.label;
 
-        const sleepInfoBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 6,
-            valign: Gtk.Align.CENTER,
-        });
         this._sleepModeValueLabel = new Gtk.Label({
             label: _('Standby (RAM)'),
             css_classes: ['dim-label'],
@@ -545,9 +551,9 @@ class PrefsController {
                 'Hibernate and Hybrid Sleep are not configured on this system. Click the info button for details.'
             ),
         });
-        sleepInfoBox.append(sleepInfo.button);
-        sleepInfoBox.append(this._sleepModeValueLabel);
-        this._sleepModeInfoRow.add_suffix(sleepInfoBox);
+        this._sleepModeInfoRow.add_suffix(
+            createSuffixBox(sleepInfo.button, this._sleepModeValueLabel)
+        );
         this._globalGroup.add(this._sleepModeInfoRow);
 
         // Low Battery Level: Default (X%) | Custom + Info popover + subordinate SpinRow
@@ -567,12 +573,6 @@ class PrefsController {
             ).format(this._upowerPct ? `${this._upowerPct}%` : _('the system default'))
         ).button;
 
-        const lowBatBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 6,
-            valign: Gtk.Align.CENTER,
-        });
-
         this._lowBatteryModeDropDown = new Gtk.DropDown({
             model: Gtk.StringList.new([defaultLowLabel, _('Custom')]),
             valign: Gtk.Align.CENTER,
@@ -585,9 +585,7 @@ class PrefsController {
             this._settings.set_string('low-battery-mode', mode);
         });
 
-        lowBatBox.append(lowBatInfoBtn);
-        lowBatBox.append(this._lowBatteryModeDropDown);
-        this._lowBatteryRow.add_suffix(lowBatBox);
+        this._lowBatteryRow.add_suffix(createSuffixBox(lowBatInfoBtn, this._lowBatteryModeDropDown));
         this._globalGroup.add(this._lowBatteryRow);
 
         // Subordinate SpinRow (only visible when Custom is selected)
@@ -632,12 +630,6 @@ class PrefsController {
             ).format(DEFAULT_UNPLUG_GRACE_SECONDS)
         ).button;
 
-        const graceBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 6,
-            valign: Gtk.Align.CENTER,
-        });
-
         this._graceModeDropDown = new Gtk.DropDown({
             model: Gtk.StringList.new([
                 _('Default (%ds)').format(DEFAULT_UNPLUG_GRACE_SECONDS),
@@ -653,9 +645,7 @@ class PrefsController {
             this._settings.set_string('unplug-while-closed-mode', mode);
         });
 
-        graceBox.append(graceInfoBtn);
-        graceBox.append(this._graceModeDropDown);
-        this._graceRow.add_suffix(graceBox);
+        this._graceRow.add_suffix(createSuffixBox(graceInfoBtn, this._graceModeDropDown));
         this._advancedExpander.add_row(this._graceRow);
 
         this._graceCustomRow = new Adw.SpinRow({
@@ -738,12 +728,7 @@ class PrefsController {
                 const lowBatTypeOwned = Boolean(recovery.lowBatType);
                 const lowBatTimeoutOwned = Boolean(recovery.lowBatTimeout);
 
-                const typeKey =
-                    stateKey === 'ac' ? 'sleep-inactive-ac-type' : 'sleep-inactive-battery-type';
-                const timeoutKey =
-                    stateKey === 'ac'
-                        ? 'sleep-inactive-ac-timeout'
-                        : 'sleep-inactive-battery-timeout';
+                const { typeKey, timeoutKey } = nativePowerKeys(stateKey);
 
                 const existingTimeout = lowBatTimeoutOwned
                     ? recovery.lowBatTimeout.baseline
@@ -983,12 +968,7 @@ class PrefsController {
 
     _readExactIdleState(stateKey, cfg) {
         if (stateKey === 'ac' || stateKey === 'battery') {
-            const typeKey =
-                stateKey === 'ac' ? 'sleep-inactive-ac-type' : 'sleep-inactive-battery-type';
-            const timeoutKey =
-                stateKey === 'ac'
-                    ? 'sleep-inactive-ac-timeout'
-                    : 'sleep-inactive-battery-timeout';
+            const { typeKey, timeoutKey } = nativePowerKeys(stateKey);
 
             let rawAction = this._gnomePowerSettings
                 ? this._gnomePowerSettings.get_string(typeKey)
@@ -1039,7 +1019,7 @@ class PrefsController {
             const cfg = readStateConfig(this._settings, stateKey);
             const globalCfg = readGlobalConfig(this._settings);
 
-            this._selectComboById(this._profileRow, this._profileChoices, cfg.powerProfile);
+            this._selectOption(this._profileRow, this._profileChoices, 'id', cfg.powerProfile);
 
             // Lid action + dynamic user-friendly subtitle (preserve 'hibernate' if currently saved)
             const canHibernate = this._capabilities.canHibernate;
@@ -1047,7 +1027,7 @@ class PrefsController {
                 o => o.id !== 'hibernate' || canHibernate || cfg.lidAction === 'hibernate'
             );
             setModelIfChanged(this._lidRow, this._lidChoices.map(o => _(o.label)));
-            this._selectComboById(this._lidRow, this._lidChoices, cfg.lidAction);
+            this._selectOption(this._lidRow, this._lidChoices, 'id', cfg.lidAction);
             const activeLidOpt =
                 this._lidChoices.find(c => c.id === cfg.lidAction) ?? this._lidChoices[0];
             if (activeLidOpt)
@@ -1076,8 +1056,7 @@ class PrefsController {
                 this._idleActionDropDown,
                 actionChoices.map(o => o.label)
             );
-            const actionIdx = actionChoices.findIndex(o => o.id === exactIdle.action);
-            this._idleActionDropDown.selected = actionIdx >= 0 ? actionIdx : 0;
+            this._selectOption(this._idleActionDropDown, actionChoices, 'id', exactIdle.action);
 
             const delayActive =
                 exactIdle.action === 'suspend' || exactIdle.action === 'hibernate';
@@ -1086,11 +1065,12 @@ class PrefsController {
                 this._idleTimeoutDropDown,
                 this._idleTimeoutChoices.map(o => o.label)
             );
-            const timeoutIdx = this._idleTimeoutChoices.findIndex(
-                o => o.value === exactIdle.timeout
+            this._selectOption(
+                this._idleTimeoutDropDown,
+                this._idleTimeoutChoices,
+                'value',
+                exactIdle.timeout
             );
-            this._idleTimeoutDropDown.selected = timeoutIdx >= 0 ? timeoutIdx : 0;
-            this._idleTimeoutDropDown.visible = true;
             this._idleTimeoutDropDown.sensitive = delayActive;
 
             this._idleRow.subtitle =
@@ -1098,7 +1078,7 @@ class PrefsController {
                     ? _('Override battery suspend while battery is low')
                     : _('Put the computer to sleep after inactivity');
 
-            this._selectComboByValue(this._screenBlankRow, SCREEN_BLANK_OPTIONS, cfg.screenBlank);
+            this._selectOption(this._screenBlankRow, SCREEN_BLANK_OPTIONS, 'value', cfg.screenBlank);
 
             // Contextual conflict guardrail banner (strictly above boxed list)
             const conflictCfg = {
@@ -1131,9 +1111,10 @@ class PrefsController {
             const globalCfg = readGlobalConfig(this._settings);
 
             if (this._sleepModeComboRow.visible) {
-                this._selectComboById(
+                this._selectOption(
                     this._sleepModeComboRow,
                     this._sleepModeChoices,
+                    'id',
                     globalCfg.sleepMode
                 );
             }
@@ -1150,14 +1131,9 @@ class PrefsController {
         }
     }
 
-    _selectComboById(comboRow, choices, id) {
-        const idx = choices.findIndex(c => c.id === id);
-        comboRow.selected = idx >= 0 ? idx : 0;
-    }
-
-    _selectComboByValue(comboRow, choices, value) {
-        const idx = choices.findIndex(c => c.value === value);
-        comboRow.selected = idx >= 0 ? idx : 0;
+    _selectOption(widget, choices, prop, target) {
+        const idx = choices.findIndex(c => c[prop] === target);
+        widget.selected = idx >= 0 ? idx : 0;
     }
 
     destroy() {

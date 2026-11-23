@@ -79,7 +79,6 @@ export default class PowerStatesExtension extends Extension {
         this._initialReconcilePending = true;
         this._undockDeadlineUs = 0;
         this._loginCapProbeGeneration = 0;
-        this._loginCapabilityRefreshNeeded = false;
         this._loginCapRetryTimerId = null;
 
         this._idleController = new IdleController(this._settings);
@@ -99,15 +98,10 @@ export default class PowerStatesExtension extends Extension {
                 if (!isConnected) {
                     // Invalidate any in-flight capability probe from the lost owner
                     this._loginCapProbeGeneration++;
-                    this._loginCapabilityRefreshNeeded = false;
                     return;
                 }
-                if (!this._initialized) {
-                    // Record recovery that happened while _initAsync is still settling
-                    this._loginCapabilityRefreshNeeded = true;
-                    return;
-                }
-                this._refreshLoginCapabilities(ownerGen, 0);
+                if (this._initialized)
+                    this._refreshLoginCapabilities(ownerGen, 0);
             },
             shouldPauseMediaOnSleep: () =>
                 safeGetBoolean(this._settings, 'pause-media-on-suspend', true),
@@ -175,7 +169,6 @@ export default class PowerStatesExtension extends Extension {
             return;
 
         const ownerChangedDuringInit =
-            this._loginCapabilityRefreshNeeded ||
             this._lidController.loginOwnerGeneration !== startOwnerGen;
 
         if (capRes.status === 'fulfilled') {
@@ -212,7 +205,6 @@ export default class PowerStatesExtension extends Extension {
             (ownerChangedDuringInit || !this._capabilities.login1Probed) &&
             this._lidController.isLoginConnected
         ) {
-            this._loginCapabilityRefreshNeeded = false;
             this._refreshLoginCapabilities(this._lidController.loginOwnerGeneration, 0);
         }
     }
@@ -306,7 +298,6 @@ export default class PowerStatesExtension extends Extension {
         this._manualOverrideActive = false;
         this._initialReconcilePending = false;
         this._undockDeadlineUs = 0;
-        this._loginCapabilityRefreshNeeded = false;
     }
 
     _readAllStateConfigs() {
