@@ -320,6 +320,15 @@ test('resolveSleepAction: falls back to suspend when hybrid/s2h unsupported', ()
         'hybrid-sleep',
         'hybrid supported'
     );
+    assertEqual(
+        resolveSleepAction('suspend', {
+            canSuspend: false,
+            canHybridSleep: true,
+            canSuspendThenHibernate: false,
+        }),
+        'hybrid-sleep',
+        'falls back to sole supported sleep mode when plain suspend is unavailable'
+    );
 });
 
 // 6. Conflict detection guardrails

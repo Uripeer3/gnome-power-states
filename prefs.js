@@ -26,7 +26,7 @@ import {
     readGlobalConfig,
     readStateConfig,
 } from './lib/configStore.js';
-import { readRecoveryState, updateRecoveryState } from './lib/idleController.js';
+import { readRecoveryState } from './lib/idleController.js';
 import { detectPolicyConflicts, resolvePowerState } from './lib/policyEngine.js';
 import { readUPowerPercentageLow } from './lib/upowerConfig.js';
 
@@ -477,19 +477,8 @@ class PrefsController {
             if (this._syncingUi)
                 return;
             const choice = SCREEN_BLANK_OPTIONS[this._screenBlankRow.selected];
-            if (choice) {
-                // Clear any saved relinquishment for this state (or wildcard '*') so
-                // edits made while the extension is disabled take effect on next enable.
-                updateRecoveryState(this._settings, state => {
-                    if (
-                        state.idleRelinquished === this._selectedState ||
-                        state.idleRelinquished === '*'
-                    ) {
-                        delete state.idleRelinquished;
-                    }
-                });
+            if (choice)
                 this._settings.set_int(`${this._selectedState}-screen-blank`, choice.value);
-            }
         });
         stateList.append(this._screenBlankRow);
 
@@ -756,18 +745,9 @@ class PrefsController {
                         ? 'sleep-inactive-ac-timeout'
                         : 'sleep-inactive-battery-timeout';
 
-                // Per-key handling: if Low Battery currently owns a battery key,
-                // update its authoritative recovery baseline instead of clobbering
-                // the active Low Battery override.
-                if (lowBatTypeOwned || (delayActive && lowBatTimeoutOwned)) {
-                    updateRecoveryState(this._settings, state => {
-                        if (state.lowBatType)
-                            state.lowBatType.baseline = actionId;
-                        if (delayActive && state.lowBatTimeout)
-                            state.lowBatTimeout.baseline = timeoutValue;
-                    });
-                }
-
+                // Per-key handling: while Low Battery owns a battery key, leave recovery-state
+                // strictly single-writer owned by extension.js (writing battery-idle-* below
+                // triggers syncExplicitNativeAutoSuspend in extension.js to update the baseline).
                 if (!lowBatTypeOwned && this._gnomePowerSettings?.is_writable(typeKey))
                     this._gnomePowerSettings.set_string(typeKey, actionId);
 
@@ -780,12 +760,6 @@ class PrefsController {
                         this._settings.set_int(`${stateKey}-idle-timeout`, timeoutValue);
                 }
             } else {
-                // Clear saved low-battery relinquishment markers so edits made while
-                // the extension is disabled take effect on the next enable.
-                updateRecoveryState(this._settings, state => {
-                    delete state.lowBatTypeRelinquished;
-                    delete state.lowBatTimeoutRelinquished;
-                });
                 this._settings.set_string('low-battery-idle-action', actionId);
                 if (delayActive)
                     this._settings.set_int('low-battery-idle-timeout', timeoutValue);

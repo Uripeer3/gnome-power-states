@@ -172,7 +172,9 @@ function makeFakeLoginProxy() {
             [['eDP-1'], [], { 'is-builtin': new GLib.Variant('b', true) }],
             [['DP-1'], [], { 'is-builtin': new GLib.Variant('b', false) }],
         ],
-        [],
+        [
+            [0, 0, 1, 0, true, [['DP-1', 'V', 'P', 'S']], {}],
+        ],
         {},
     ];
 
@@ -656,12 +658,33 @@ function makeFakeLoginProxy() {
     // Case 2: Single panel with omitted is-builtin defaults to built-in (not external)
     lid._displayProxy = {
         GetCurrentStateRemote(cb) {
-            cb([2, [[['eDP-1'], [], {}]], [], {}], null);
+            cb([2, [[['eDP-1'], [], {}]], [[0, 0, 1, 0, true, [['eDP-1', 'V', 'P', 'S']], {}]], {}], null);
         },
     };
     lid._refreshExternalMonitorState(false);
     drainMicrotasks();
     assertEqual(lid.externalMonitorConnected, false, 'sole panel missing is-builtin treated as built-in');
+
+    // Case 3: Empty logical_monitors array (all connected displays disabled) -> externalMonitorConnected=false
+    lid._displayProxy = {
+        GetCurrentStateRemote(cb) {
+            cb(
+                [
+                    3,
+                    [
+                        [['eDP-1'], [], { 'is-builtin': new GLib.Variant('b', true) }],
+                        [['DP-1'], [], { 'is-builtin': new GLib.Variant('b', false) }],
+                    ],
+                    [],
+                    {},
+                ],
+                null
+            );
+        },
+    };
+    lid._refreshExternalMonitorState(false);
+    drainMicrotasks();
+    assertEqual(lid.externalMonitorConnected, false, 'empty logical_monitors means no active external display');
 
     lid.destroy();
 })();

@@ -37,6 +37,8 @@ import {
 import { ProfileController } from './lib/profileController.js';
 import { UPowerWatcher } from './lib/upowerWatcher.js';
 
+const UNDOCK_CORRELATION_WINDOW_US = 15_000_000; // 15 seconds
+
 export default class PowerStatesExtension extends Extension {
     constructor(metadata) {
         super(metadata);
@@ -68,6 +70,7 @@ export default class PowerStatesExtension extends Extension {
         this._manualOverrideActive = false;
         this._initialReconcilePending = true;
         this._deferredUndockGrace = false;
+        this._deferredUndockDeadlineUs = 0;
         this._loginCapProbeGeneration = 0;
         this._loginCapabilityRefreshNeeded = false;
         this._loginCapRetryTimerId = null;
@@ -78,6 +81,7 @@ export default class PowerStatesExtension extends Extension {
             onLidCloseRequested: (gen, expectedState) => this._onLidClosed(gen, expectedState),
             onLidOpened: () => {
                 this._deferredUndockGrace = false;
+                this._deferredUndockDeadlineUs = 0;
             },
             onExternalMonitorChanged: (wasConnected, isConnected) =>
                 this._onExternalMonitorChanged(wasConnected, isConnected),
@@ -296,6 +300,7 @@ export default class PowerStatesExtension extends Extension {
         this._manualOverrideActive = false;
         this._initialReconcilePending = false;
         this._deferredUndockGrace = false;
+        this._deferredUndockDeadlineUs = 0;
         this._loginCapabilityRefreshNeeded = false;
     }
 
@@ -409,25 +414,33 @@ export default class PowerStatesExtension extends Extension {
             const currentState = resolvePowerState(reading, globalConfig);
             const stateConfig = readStateConfig(this._settings, currentState);
 
+            const undockFresh =
+                this._deferredUndockGrace &&
+                GLib.get_monotonic_time() <= this._deferredUndockDeadlineUs;
             const undockCheck = shouldTriggerClosedLidActionOnUndock({
                 lidClosed: this._lidController.lidClosed,
                 powerState: currentState,
                 stateConfig,
                 sleepMode: globalConfig.sleepMode,
                 capabilities: this._capabilities,
-                deferredUndockGrace: this._deferredUndockGrace,
+                deferredUndockGrace: undockFresh,
             });
 
             if (undockCheck.shouldTrigger) {
                 this._deferredUndockGrace = false;
+                this._deferredUndockDeadlineUs = 0;
                 this._lidController.scheduleGraceAction(
                     globalConfig.unplugWhileClosedGraceSeconds,
                     currentState,
                     (gen, expectedState) => this._onLidClosed(gen, expectedState)
                 );
+            } else if (!undockFresh) {
+                this._deferredUndockGrace = false;
+                this._deferredUndockDeadlineUs = 0;
             }
         } else if (!wasConnected && isConnected) {
             this._deferredUndockGrace = false;
+            this._deferredUndockDeadlineUs = 0;
             this._lidController.cancelGraceTimer();
         }
     }
@@ -545,8 +558,21 @@ export default class PowerStatesExtension extends Extension {
                     nextLidDecision: lidDecision,
                 });
 
-                if (closedCheck.shouldTrigger) {
+                const isBatteryBounceWithActiveAction =
+                    stateChanged &&
+                    ((previousState === 'low-battery' && nextState === 'battery') ||
+                        (previousState === 'battery' && nextState === 'low-battery')) &&
+                    this._lidController.lidClosed &&
+                    this._lidController.hasActiveGraceTimer &&
+                    lidDecision.actionOnClose !== 'nothing' &&
+                    lidDecision.actionOnClose !== 'system';
+
+                if (isBatteryBounceWithActiveAction) {
+                    // Preserve the original unplug deadline across battery <-> low-battery
+                    // bounces so repeated threshold crossings neither cancel nor reset sleep.
+                } else if (closedCheck.shouldTrigger) {
                     this._deferredUndockGrace = false;
+                    this._deferredUndockDeadlineUs = 0;
                     this._lidController.scheduleGraceAction(
                         globalConfig.unplugWhileClosedGraceSeconds,
                         nextState,
@@ -557,31 +583,49 @@ export default class PowerStatesExtension extends Extension {
                         (previousState === 'ac' &&
                             (nextState === 'battery' || nextState === 'low-battery')) ||
                         (previousState === 'battery' && nextState === 'low-battery');
-                    const isBatteryBounceWithActiveAction =
-                        ((previousState === 'low-battery' && nextState === 'battery') ||
-                            (previousState === 'battery' && nextState === 'low-battery')) &&
-                        this._lidController.lidClosed &&
-                        this._lidController.hasActiveGraceTimer &&
-                        lidDecision.actionOnClose !== 'nothing' &&
-                        lidDecision.actionOnClose !== 'system';
-
-                    if (isBatteryBounceWithActiveAction) {
-                        // Preserve an active unplug grace timer across low-battery <-> battery
-                        // percentage/warning bounces while still on battery with an active action.
-                    } else if (
+                    if (
                         isPowerLossTransition &&
                         this._lidController.lidClosed &&
                         lidDecision.blockedByExternalMonitor
                     ) {
-                        // Power dropped while docked with lid shut; allow imminent monitor
-                        // disconnect from the same undock to trigger the unplug grace action.
+                        // Power dropped while docked with lid shut; allow an imminent monitor
+                        // disconnect from the same undock (within 15s) to trigger the grace action.
                         this._deferredUndockGrace = true;
+                        this._deferredUndockDeadlineUs =
+                            GLib.get_monotonic_time() + UNDOCK_CORRELATION_WINDOW_US;
                     } else {
                         this._deferredUndockGrace = false;
+                        this._deferredUndockDeadlineUs = 0;
                         this._lidController.cancelGraceTimer();
                     }
                 } else if (!this._lidController.lidClosed) {
                     this._deferredUndockGrace = false;
+                    this._deferredUndockDeadlineUs = 0;
+                } else if (
+                    this._deferredUndockGrace &&
+                    !this._lidController.externalMonitorConnected
+                ) {
+                    // Consume a deferred USB-C undock whose monitor disconnect happened
+                    // while the battery reading was temporarily incomplete.
+                    const undockFresh =
+                        GLib.get_monotonic_time() <= this._deferredUndockDeadlineUs;
+                    const undockCheck = shouldTriggerClosedLidActionOnUndock({
+                        lidClosed: this._lidController.lidClosed,
+                        powerState: nextState,
+                        stateConfig: activeStateConfig,
+                        sleepMode: globalConfig.sleepMode,
+                        capabilities: this._capabilities,
+                        deferredUndockGrace: undockFresh,
+                    });
+                    this._deferredUndockGrace = false;
+                    this._deferredUndockDeadlineUs = 0;
+                    if (undockCheck.shouldTrigger) {
+                        this._lidController.scheduleGraceAction(
+                            globalConfig.unplugWhileClosedGraceSeconds,
+                            nextState,
+                            (gen, expectedState) => this._onLidClosed(gen, expectedState)
+                        );
+                    }
                 }
             }
         }
@@ -605,15 +649,22 @@ export default class PowerStatesExtension extends Extension {
         const globalConfig = readGlobalConfig(this._settings);
 
         // Never drop a lid-close event while holding handle-lid-switch:
-        // if WarningLevel/Percentage is transiently incomplete, resolve from known AC/battery
-        // state, or fall back conservatively to last known state / 'battery'.
+        // if WarningLevel/Percentage is transiently incomplete, keep the active
+        // low-battery policy if still on battery, otherwise resolve known onBattery
+        // or fall back conservatively to last known state / 'battery'.
         let currentState;
-        if (isPowerReadingComplete(reading, globalConfig))
+        if (isPowerReadingComplete(reading, globalConfig)) {
             currentState = resolvePowerState(reading, globalConfig);
-        else if (reading?.known)
-            currentState = reading.onBattery ? 'battery' : 'ac';
-        else
+        } else if (reading?.known) {
+            if (!reading.onBattery)
+                currentState = 'ac';
+            else if (this._lastPolicyState === 'low-battery')
+                currentState = 'low-battery';
+            else
+                currentState = 'battery';
+        } else {
             currentState = this._lastPolicyState ?? 'battery';
+        }
 
         const stateMatches =
             expectedState === null ||

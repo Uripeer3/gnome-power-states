@@ -118,7 +118,7 @@ const sampleConfigs = {
     const recAfterEdit = readRecoveryState(ext);
     assertEqual(Boolean(recAfterEdit.lowBatType), true, 'type ownership preserved after timeout edit');
     assertEqual(Boolean(recAfterEdit.lowBatTimeout), false, 'timeout ownership relinquished');
-    assertEqual(recAfterEdit.lowBatTimeoutRelinquished, true, 'timeout relinquishment persisted atomically');
+    assertEqual(Boolean(recAfterEdit.lowBatTimeoutRelinquished), true, 'timeout relinquishment persisted atomically');
 
     // Simulate Shell crash (no destroy() called) -> fresh instance restores owned keys only
     power.simulateProcessCrash();
@@ -240,17 +240,15 @@ const sampleConfigs = {
     assertEqual(session.get_uint('idle-delay'), 480, 'same-state restart preserves user edit 480');
     idle2.destroy();
 
-    // Offline Preferences edit clears idleRelinquished and sets new target 900
-    updateRecoveryState(ext, s => {
-        delete s.idleRelinquished;
-    });
+    // Offline Preferences edit changes battery-screen-blank from 300 -> 900 WITHOUT
+    // touching recovery-state (strict single-writer ownership by IdleController!)
     const updatedConfigs = {
         ...sampleConfigs,
         battery: { ...sampleConfigs.battery, screenBlank: 900 },
     };
     const idle3 = new IdleController(ext, { powerSettings: power, sessionSettings: session });
     idle3.applyForState('battery', updatedConfigs, { isInitialStartup: true });
-    assertEqual(session.get_uint('idle-delay'), 900, 'offline Preferences edit applies on next enable');
+    assertEqual(session.get_uint('idle-delay'), 900, 'offline Preferences edit detected & applied on next enable');
     idle3.destroy();
     assertEqual(session.get_uint('idle-delay'), 480, 'restores 480 baseline on disable');
 })();
@@ -400,9 +398,13 @@ const sampleConfigs = {
     const session = makeFakeSettings({ 'idle-delay': 600 });
     const idle = new IdleController(staleSettings, { powerSettings: power, sessionSettings: session });
     idle.applyForState('battery', sampleConfigs, { stateChanged: true });
-    assertEqual(session.get_uint('idle-delay'), 300, 'stale schema falls back to in-memory recovery');
+    assertEqual(
+        session.get_uint('idle-delay'),
+        600,
+        'stale schema defers temporary native override instead of mutating without durable persistence'
+    );
     idle.destroy();
-    assertEqual(session.get_uint('idle-delay'), 600, 'in-memory fallback still restores 600 cleanly');
+    assertEqual(session.get_uint('idle-delay'), 600, 'native idle-delay stays untouched at 600');
 })();
 
 if (failed > 0) {
