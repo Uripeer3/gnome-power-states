@@ -32,10 +32,10 @@ Power States spawns **zero background daemons**, **zero root helpers**, and **ze
 
 ```mermaid
 flowchart TD
-    EN["enable() — ++_initGeneration"] --> INIT["Async parallel init:<br/>probeSystemCapabilities()<br/>UPowerWatcher.initialize() (deferred emit)<br/>LidController.initialize()<br/>ProfileController.initialize()"]
+    EN["enable() — ++_initGeneration"] --> INIT["Async fast-path init:<br/>UPowerWatcher.initialize() + ProfileController.initialize()<br/>(LidController.initialize() runs in parallel without blocking)"]
     INIT --> GEN{"!_destroyed &&<br/>gen === _initGeneration?"}
     GEN -- No --> DROP["Abort stale continuation"]
-    GEN -- Yes --> READY["_initialized = true<br/>Initial _reconcile(reading, forceProfile=true, isInitialStartup=true)"]
+    GEN -- Yes --> READY["_initialized = true<br/>Initial _reconcile(reading, forceProfile=true, isInitialStartup=true)<br/>(LidController syncs FDs & sleep caps once ready)"]
     READY --> LIVE["Event-Driven Steady State<br/>(user + unlock-dialog modes)"]
     LIVE --> LOCK["Screen Locked (unlock-dialog)<br/>Extension stays alive -> FD stays held"]
     LOCK --> LIVE
@@ -54,7 +54,7 @@ GNOME Shell calls `disable()` on user-only extensions whenever the screen locks.
 
 ```mermaid
 flowchart LR
-    UP["UPower change<br/>(LINE_POWER.Online or<br/>DisplayDevice.WarningLevel/Percentage)"] --> W["UPowerWatcher<br/>getReading()"]
+    UP["UPower change<br/>(LINE_POWER.Online, root OnBattery,<br/>DisplayDevice.State / WarningLevel / Percentage)"] --> W["UPowerWatcher<br/>getReading()"]
     W --> PE["policyEngine.resolvePowerState()<br/>-> ac | battery | low-battery"]
     PE --> CHG{"State changed<br/>from _lastPolicyState?"}
     CHG -- Yes --> CLR["_manualOverrideActive = false"]
@@ -63,6 +63,7 @@ flowchart LR
     KEEP --> ACT2["1. ProfileController: skip (respect Quick Settings)<br/>2. IdleController: keep active state<br/>3. LidController: keep FD"]
 ```
 
+- **Stale USB-C adapter reconciliation:** `UPowerWatcher` treats unanimous `LINE_POWER.Online=true` + `OnBattery=false` (or a fresh `false → true` plug-in edge within a 2s window) as immediate AC. If an adapter stays stale `Online=true` without a fresh plug-in edge while `UPower.OnBattery=true`, `DisplayDevice.State` breaks the tie (`Discharging`/`PendingDischarge` → Battery; unknown/missing `DisplayDevice` → deferred as incomplete `known=false` while retrying `DisplayDevice` attachment).
 - **Transition defaults, not hard locks:** If the user switches Power Mode in GNOME Quick Settings, `ProfileController` sees an `ActiveProfile` change not matched by `_expectedEchoes` (independent of `PerformanceDegraded` signal batching), clears `_lastCommittedTarget`, sets `_manualOverrideActive = true`, and stops writing profiles until the next physical power transition (or an explicit edit to the *active* state's Power Mode in Preferences).
 - **Key-routed preference edits:** Changing unrelated preferences (notifications, lid policy, idle timeouts, or an *inactive* state's profile) never clears `_manualOverrideActive`.
 
@@ -115,8 +116,8 @@ When a closed laptop (`LidClosed === true`) loses AC power (`ac → battery` or 
 | Controller | State Field(s) | Purpose | Cleared / Restored On |
 |---|---|---|---|
 | `PowerStatesExtension` | `_initGeneration`, `_initialized`, `_destroyed`, `_initialReconcilePending`, `_loginCapProbeGeneration`, `_loginCapRetryTimerId` | Prevents stale async continuations, defers startup policy until complete UPower readings arrive, and refreshes `logind` sleep capabilities per owner generation with bounded retry | Every `enable()` / `disable()` / `logind` owner change |
-| `PowerStatesExtension` | `_lastPolicyState`, `_manualOverrideActive`, `_undockDeadlineUs` | Transition-only tracking, manual Quick Settings preservation, and 15s-bounded USB-C undock replay (never triggering on display-only AC disconnects) | Physical state change / lid reopen / active profile edit / `disable()` |
-| `UPowerWatcher` | `_ready`, `_ownerGen`, `_linePowerDevices` Map, `_attachingLinePower` Set | Suppresses premature events during initial enumeration; deduplicates per-owner `LINE_POWER` attachment and discards obsolete-owner discovery | `notify::g-name-owner` / `destroy()` |
+| `PowerStatesExtension` | `_lastPolicyState`, `_lastLidPolicyState`, `_manualOverrideActive`, `_undockDeadlineUs` | Transition-only tracking (keeping lid escalation state independent of pre-lid-ready profile updates), manual Quick Settings preservation, and 15s-bounded USB-C undock replay (never triggering on display-only AC disconnects) | Physical state change / lid reopen / active profile edit / `disable()` |
+| `UPowerWatcher` | `_ready`, `_ownerGen`, `_linePowerDevices` Map, `_attachingLinePower` Map (token-keyed), `_attachingDisplay`, `_freshAcEdgeUntilUs` | Suppresses premature events during initial enumeration; invalidates in-flight `LINE_POWER` attachments on `DeviceRemoved`; distinguishes fresh plug-in edges from stale USB-C adapters | `notify::g-name-owner` / `DeviceRemoved` / `destroy()` |
 | `ProfileController` | `_candidates`, `_activeEntry`, `_inFlightWrite`, `_queuedWrite`, `_lastCommittedTarget`, `_expectedEchoes`, `_echoExpireTimerId`, `_lapDebounceId` | Serialized PPD writes across modern & legacy buses (with bounded no-op echo expiry); distinguishes extension echoes from manual Quick Settings edits independently of `PerformanceDegraded` batching | Echo/reply completion / expiry / `destroy()` |
 | `LidController` | `_inhibitorStream`, `_sleepDelayStream`, `_loginOwnerGen`, `_lidInFlightOwnerGen`, `_sleepDelayInFlightOwnerGen`, `_sessionActive`, `_lidClosed`, `_externalMonitorConnected`, `_monitorQueryInFlight`, `_monitorRefreshQueued`, `_monitorNotifyPending`, `_preparingForSleep`, `_actionGeneration`, `_graceTimerId`, `_graceMonitorCheckInFlight`, `_pendingGraceAfterFd` | Fail-closed canonical session gating, owner-generation FD lifecycle, single-flight coalesced topology queries (filtering by active `logical_monitors`), startup/reconnect lid snapshots, and queued close/grace replay | Lid reopen / policy change / owner change / `destroy()` |
 | `IdleController` | Single atomic `recovery-state` JSON key (sole writer) | Per-key ownership, crash recovery, and external-edit relinquishment surviving same-state disable/enable while detecting offline Preferences changes | Physical state transition / explicit prefs edit / `destroy()` |

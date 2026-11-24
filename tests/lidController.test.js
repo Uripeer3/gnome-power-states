@@ -438,6 +438,45 @@ function makeFakeLoginProxy() {
     lid._handlePrepareForSleep(false);
     assertEqual(lid._preparingForSleep, false, 'preparingForSleep cleared on resume');
     assertEqual(acquireAttempts, 1, 'reacquires delay FD on resume');
+
+    // OperationInProgress on sleep-delay marks _preparingForSleep=true so resume reacquires cleanly,
+    // AND a late OperationInProgress callback arriving AFTER PrepareForSleep(false) never clobbers
+    // _preparingForSleep back to true (it immediately reacquires instead).
+    const opCallbacks = [];
+    const lidOp = new LidController({
+        inhibitTransport: (_req, done) => {
+            opCallbacks.push(done);
+        },
+    });
+    lidOp._sessionActive = true;
+    lidOp.setSleepDelayDesired(true);
+    assertEqual(opCallbacks.length, 1, 'initial sleep-delay acquire launched');
+    opCallbacks[0](null, new Error('GDBus.Error:org.freedesktop.login1.OperationInProgress'));
+    assertEqual(
+        lidOp._preparingForSleep,
+        true,
+        'OperationInProgress on sleep-delay defers until PrepareForSleep(false)'
+    );
+    lidOp.setSleepDelayDesired(true);
+    assertEqual(opCallbacks.length, 1, 'does not retry sleep-delay while OperationInProgress active');
+    lidOp._handlePrepareForSleep(false);
+    assertEqual(opCallbacks.length, 2, 'resume reacquires sleep-delay after OperationInProgress');
+
+    // Now simulate PrepareForSleep(false) firing WHILE a stale Inhibit is still in flight:
+    lidOp._handlePrepareForSleep(false);
+    opCallbacks[1](null, new Error('GDBus.Error:org.freedesktop.login1.OperationInProgress'));
+    assertEqual(
+        lidOp._preparingForSleep,
+        false,
+        'late OperationInProgress after PrepareForSleep(false) does not re-set _preparingForSleep'
+    );
+    assertEqual(
+        opCallbacks.length,
+        3,
+        'late OperationInProgress after resume immediately retries sleep-delay acquisition'
+    );
+    lidOp.destroy();
+
     lid.destroy();
 })();
 
@@ -746,10 +785,56 @@ function makeFakeLoginProxy() {
     assertEqual(partialAdapters.known, true, 'partial adapter set falls back to live root');
     assertEqual(partialAdapters.onBattery, false, 'partial adapter set does not fabricate Battery over root AC');
 
-    // One confirmed online adapter establishes AC even while another is unknown
+    // Contradictory reading: adapter Online=true, root OnBattery=true, DisplayDevice.State unknown
+    // -> must report incomplete (known=false) instead of fabricating AC!
     watcher._linePowerDevices.get('/ac0').proxy.Online = true;
     watcher._upowerProxy.OnBattery = true;
+    watcher._displayProxy.State = 0; // UNKNOWN
+    assertEqual(
+        watcher.getReading().known,
+        false,
+        'contradictory online adapter + root OnBattery with unknown DisplayDevice reports known=false'
+    );
+
+    // One confirmed online adapter establishes AC when DisplayDevice is not discharging (e.g. Charging)
+    watcher._displayProxy.State = 1; // CHARGING
+    assertEqual(watcher.getReading().known, true, 'online adapter + charging DisplayDevice is known');
     assertEqual(watcher.getReading().onBattery, false, 'one online adapter establishes AC');
+
+    // Stale USB-C LINE_POWER proxy (Online=true) overridden when BOTH UPower root (OnBattery=true)
+    // AND DisplayDevice (State=Discharging) positively confirm battery
+    watcher._displayProxy.State = 2; // DEVICE_STATE_DISCHARGING
+    assertEqual(
+        watcher.getReading().onBattery,
+        true,
+        'stale online adapter overridden when both UPower.OnBattery and DisplayDevice.State confirm discharge'
+    );
+
+    // Fresh offline->online AC replug edge immediately overrides lagging OnBattery+Discharging
+    // so an armed closed-lid unplug grace timer cancels immediately on replug!
+    watcher._freshAcEdgeUntilUs = GLib.get_monotonic_time() + 2_000_000;
+    const replugReading = watcher.getReading();
+    assertEqual(replugReading.known, true, 'fresh AC plug-in edge is known');
+    assertEqual(replugReading.onBattery, false, 'fresh AC plug-in edge resolves to AC immediately');
+    watcher._freshAcEdgeUntilUs = 0;
+
+    // Heavy load discharging while genuinely plugged in (root OnBattery=false) stays AC
+    watcher._upowerProxy.OnBattery = false;
+    assertEqual(
+        watcher.getReading().onBattery,
+        false,
+        'discharging battery alone does not override online AC when UPower.OnBattery is false'
+    );
+    watcher._displayProxy.State = 0;
+
+    // DeviceRemoved invalidates any in-flight attachment token for that path
+    watcher._attachingLinePower.set('/hotplug_ac', 99);
+    watcher._detachLinePower('/hotplug_ac');
+    assertEqual(
+        watcher._attachingLinePower.has('/hotplug_ac'),
+        false,
+        'DeviceRemoved clears in-flight attachment token so immediate re-add can proceed'
+    );
 
     // All adapters positively offline -> onBattery=true
     watcher._linePowerDevices.get('/ac0').proxy.Online = false;

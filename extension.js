@@ -16,7 +16,7 @@ import {
     gettext as _,
 } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import { probeLoginSleepCapabilities, probeSystemCapabilities } from './lib/capabilities.js';
+import { probeLoginSleepCapabilities } from './lib/capabilities.js';
 import {
     SCHEMA_ID,
     readGlobalConfig,
@@ -70,11 +70,10 @@ export default class PowerStatesExtension extends Extension {
             canHibernate: false,
             canHybridSleep: false,
             canSuspendThenHibernate: false,
-            availableProfiles: ['power-saver', 'balanced', 'performance'],
-            hasPowerProfiles: false,
         };
 
         this._lastPolicyState = null;
+        this._lastLidPolicyState = null;
         this._manualOverrideActive = false;
         this._initialReconcilePending = true;
         this._undockDeadlineUs = 0;
@@ -100,7 +99,7 @@ export default class PowerStatesExtension extends Extension {
                     this._loginCapProbeGeneration++;
                     return;
                 }
-                if (this._initialized)
+                if (this._lidController?.isReady)
                     this._refreshLoginCapabilities(ownerGen, 0);
             },
             shouldPauseMediaOnSleep: () =>
@@ -157,56 +156,45 @@ export default class PowerStatesExtension extends Extension {
     }
 
     async _initAsync(generation) {
-        const startOwnerGen = this._lidController.loginOwnerGeneration;
-        const [capRes] = await Promise.allSettled([
-            probeSystemCapabilities(),
+        // Initialize LidController in parallel without blocking the power-state/profile
+        // loop: UPower + PowerProfiles are already-running system daemons, whereas
+        // ScreenSaver / DisplayConfig / logind session resolution can lag right at login.
+        this._lidController
+            .initialize()
+            .then(initialSleepCaps => {
+                if (this._destroyed || generation !== this._initGeneration)
+                    return;
+                if (initialSleepCaps)
+                    this._capabilities = { ...this._capabilities, ...initialSleepCaps };
+                if (!this._capabilities.login1Probed && this._lidController.isLoginConnected)
+                    this._refreshLoginCapabilities(this._lidController.loginOwnerGeneration, 0);
+                const reading = this._upowerWatcher?.getReading();
+                if (reading?.lidStateKnown)
+                    this._lidController?.syncLidClosedSnapshot(reading.lidIsClosed);
+                if (this._initialized && reading)
+                    this._reconcile(reading);
+            })
+            .catch(e => {
+                console.warn(`[power-states] LidController initialization failed: ${e.message}`);
+            });
+
+        await Promise.allSettled([
             this._upowerWatcher.initialize(),
-            this._lidController.initialize(),
             this._profileController.initialize(),
         ]);
 
         if (this._destroyed || generation !== this._initGeneration)
             return;
 
-        const ownerChangedDuringInit =
-            this._lidController.loginOwnerGeneration !== startOwnerGen;
-
-        if (capRes.status === 'fulfilled') {
-            if (ownerChangedDuringInit) {
-                // Keep non-login1 fields (e.g. lidIsPresent, profiles) without installing
-                // sleep capabilities queried from an obsolete logind owner.
-                this._capabilities = {
-                    ...this._capabilities,
-                    lidIsPresent: capRes.value.lidIsPresent,
-                    availableProfiles: capRes.value.availableProfiles,
-                    hasPowerProfiles: capRes.value.hasPowerProfiles,
-                };
-            } else {
-                this._capabilities = capRes.value;
-            }
-        }
-
         this._initialized = true;
-        const initialReading = this._upowerWatcher.getReading();
-        if (initialReading.lidStateKnown)
-            this._lidController?.syncLidClosedSnapshot(initialReading.lidIsClosed);
 
         // On initial startup: respect external application holds AND respect any
         // intervening native GSettings edits made while Shell was down.
-        this._reconcile(initialReading, {
+        this._reconcile(this._upowerWatcher.getReading(), {
             forceProfile: true,
             userEditedProfile: false,
             isInitialStartup: true,
         });
-
-        // If logind recovered during startup OR the initial sleep probe was inconclusive,
-        // run an owner-generation-scoped refresh (with bounded retry on transient failures).
-        if (
-            (ownerChangedDuringInit || !this._capabilities.login1Probed) &&
-            this._lidController.isLoginConnected
-        ) {
-            this._refreshLoginCapabilities(this._lidController.loginOwnerGeneration, 0);
-        }
     }
 
     _clearLoginCapRetryTimer() {
@@ -217,7 +205,7 @@ export default class PowerStatesExtension extends Extension {
     }
 
     _refreshLoginCapabilities(expectedOwnerGen, retryAttempt = 0) {
-        if (this._destroyed || !this._initialized || !this._lidController)
+        if (this._destroyed || !this._lidController?.isReady)
             return;
 
         this._clearLoginCapRetryTimer();
@@ -260,7 +248,7 @@ export default class PowerStatesExtension extends Extension {
                     );
                 }
 
-                if (this._upowerWatcher)
+                if (this._initialized && this._upowerWatcher)
                     this._reconcile(this._upowerWatcher.getReading());
             })
             .catch(() => {});
@@ -295,6 +283,7 @@ export default class PowerStatesExtension extends Extension {
         this._idleController = null;
 
         this._lastPolicyState = null;
+        this._lastLidPolicyState = null;
         this._manualOverrideActive = false;
         this._initialReconcilePending = false;
         this._undockDeadlineUs = 0;
@@ -460,7 +449,7 @@ export default class PowerStatesExtension extends Extension {
         // a complete physical power reading (never guess AC during a UPower outage, and
         // never misclassify Low Battery as ordinary Battery on a partial root-only reading).
         if (!isPowerReadingComplete(reading, globalConfig)) {
-            if (this._lidController) {
+            if (this._lidController?.isReady) {
                 this._lidController.setSleepDelayDesired(globalConfig.pauseMediaOnSuspend);
                 // Preserve any active lid inhibitor while UPower root & lid feed stay live;
                 // only release here if UPower itself disconnected or lid is absent.
@@ -474,8 +463,8 @@ export default class PowerStatesExtension extends Extension {
         const effectiveForceProfile = forceProfile || this._initialReconcilePending;
         this._initialReconcilePending = false;
 
-        if (effectiveInitialStartup && reading.lidStateKnown)
-            this._lidController?.syncLidClosedSnapshot(reading.lidIsClosed);
+        if (effectiveInitialStartup && reading.lidStateKnown && this._lidController?.isReady)
+            this._lidController.syncLidClosedSnapshot(reading.lidIsClosed);
 
         const stateConfigs = this._readAllStateConfigs();
         const nextState = resolvePowerState(reading, globalConfig);
@@ -522,7 +511,10 @@ export default class PowerStatesExtension extends Extension {
         });
 
         // 3. Lid-Close Inhibitor, Sleep Delay Inhibitor & Closed-Lid Transition Handling
-        if (this._lidController) {
+        if (this._lidController?.isReady) {
+            const previousLidState = this._lastLidPolicyState;
+            const lidStateChanged = previousLidState !== null && previousLidState !== nextState;
+
             this._lidController.setSleepDelayDesired(globalConfig.pauseMediaOnSuspend);
 
             // Require UPower to be live for lid inhibition because UPower reliably
@@ -546,14 +538,14 @@ export default class PowerStatesExtension extends Extension {
 
                 const closedCheck = shouldTriggerClosedLidActionOnTransition({
                     lidClosed: this._lidController.lidClosed,
-                    previousState,
+                    previousState: previousLidState,
                     nextState,
                     nextLidDecision: lidDecision,
                 });
 
                 const isBatteryBounceWithActiveAction =
-                    stateChanged &&
-                    isBatteryPair(previousState, nextState) &&
+                    lidStateChanged &&
+                    isBatteryPair(previousLidState, nextState) &&
                     this._lidController.lidClosed &&
                     this._lidController.hasActiveGraceTimer &&
                     lidDecision.actionOnClose !== 'nothing' &&
@@ -578,12 +570,12 @@ export default class PowerStatesExtension extends Extension {
                     // Consume a deferred USB-C undock once the external monitor is gone
                     // (works in both disconnect-first and battery-shift-first orderings).
                     this._tryConsumeDeferredUndock(nextState, activeStateConfig, globalConfig);
-                } else if (stateChanged) {
+                } else if (lidStateChanged) {
                     const isPowerLossTransition =
-                        (previousState === 'ac' && isBatteryState(nextState)) ||
-                        (previousState === 'battery' && nextState === 'low-battery');
+                        (previousLidState === 'ac' && isBatteryState(nextState)) ||
+                        (previousLidState === 'battery' && nextState === 'low-battery');
                     const isStillDockedBatteryShift =
-                        isBatteryPair(previousState, nextState) &&
+                        isBatteryPair(previousLidState, nextState) &&
                         this._isUndockFresh() &&
                         this._lidController.lidClosed &&
                         lidDecision.blockedByExternalMonitor;
@@ -607,6 +599,12 @@ export default class PowerStatesExtension extends Extension {
                     this._undockDeadlineUs = 0;
                 }
             }
+
+            this._lastLidPolicyState = nextState;
+        } else if (this._lastLidPolicyState === null && previousState === null) {
+            // Seed the initial pre-lid-ready state so an already-closed startup stays inert,
+            // while an AC -> Battery unplug before LidController finishes still escalates once ready.
+            this._lastLidPolicyState = nextState;
         }
 
         this._lastPolicyState = nextState;
