@@ -18,11 +18,11 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 
 ## Features (v1)
 
-### Two-Page Preferences (`Power Source Settings` + `Advanced`)
+### Two-Page Preferences (`Simple View (GNOME)` + `Detailed View`)
 Both pages edit the same policy keys and stay live-synced with each other and with GNOME Settings; browsing pages or switching power sources never writes settings or activates profiles.
 
-- **Power Source Settings (default page)**: GNOME-facing editor with **Plugged In** and **On Battery** peer selectors, identical group and row ordering, one primary control per row, a separate live current-source status indicator (omitted when unknown), and a nested **When Battery Is Low** detail view with an accurate summary of effective differences.
-- **Advanced**: Full per-state editor (`Plugged In` | `On Battery` | `Low Battery`), global **Lid-Close Sleep Mode**, **Low Battery Level**, collapsible **Advanced** options, inline conflict banner, and explanatory info popovers.
+- **Simple View (GNOME) (default page)**: GNOME-facing editor with **Plugged In** and **On Battery** peer selectors, identical group and row ordering, one primary control per row, a separate live current-source status indicator (omitted when unknown), and a nested **When Battery Is Low** detail view with an accurate summary of effective differences.
+- **Detailed View**: Full per-state editor (`Plugged In` | `On Battery` | `Low Battery`), global **Lid-Close Sleep Mode**, **Low Battery Level**, collapsible **Advanced** options, inline conflict banner, and explanatory info popovers.
 
 ### Per-State Policies (`Plugged In` | `On Battery` | `Low Battery`)
 - **Power Mode**: Automatically switch between *Performance*, *Balanced*, *Power Saver*, or *Keep Current Mode* via `power-profiles-daemon` or `tuned-ppd`.

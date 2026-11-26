@@ -496,8 +496,8 @@ function makeBaseCaps(overrides = {}) {
             ctrl.powerSourcePage,
             'Power Source Settings is the default first page'
         );
-        assertEqual(ctrl.powerSourcePage.title, 'Power Source Settings', 'first page title');
-        assertEqual(ctrl.advancedPage.title, 'Advanced', 'second page title');
+        assertEqual(ctrl.powerSourcePage.title, 'Simple View (GNOME)', 'first page title');
+        assertEqual(ctrl.advancedPage.title, 'Detailed View', 'second page title');
 
         ctrl.initialize();
         drainEvents();
@@ -1092,8 +1092,8 @@ function makeBaseCaps(overrides = {}) {
     );
     assertEqual(
         simple._lowIdleTimeoutRow.subtitle,
-        'Inherited from On Battery',
-        'inherited delay row explains inheritance'
+        'Using On Battery setting',
+        'inherited delay row explains that it follows On Battery'
     );
     assertEqual(
         settings.get_int('low-battery-idle-timeout'),
@@ -1349,9 +1349,9 @@ function makeBaseCaps(overrides = {}) {
     );
     assertTrue(
         simple._profileGuidanceLabel.visible &&
-            simple._profileGuidanceLabel.label.includes('Quick Settings') &&
-            simple._profileGuidanceLabel.label.toLowerCase().includes('low battery'),
-        `Power Mode contextual guidance explains manual choice including low battery (got "${simple._profileGuidanceLabel.label}")`
+            simple._profileGuidanceLabel.label ===
+                'Applied when power changes. Manual changes stay active until the next change.',
+        `Power Mode contextual guidance uses clear GNOME HIG wording (got "${simple._profileGuidanceLabel.label}")`
     );
     assertEqual(
         simple._lowProfileRow.subtitle,
@@ -1692,11 +1692,13 @@ function makeBaseCaps(overrides = {}) {
         };
         const advTabBtn = findWidget(
             win,
-            w => w.constructor.name.includes('ViewSwitcherButton') && w.label === 'Advanced'
+            w => w.constructor.name.includes('ViewSwitcherButton') && w.label === 'Detailed View'
         );
         const simpleTabBtn = findWidget(
             win,
-            w => w.constructor.name.includes('ViewSwitcherButton') && w.label === 'Power Source Settings'
+            w =>
+                w.constructor.name.includes('ViewSwitcherButton') &&
+                w.label === 'Simple View (GNOME)'
         );
         assertTrue(Boolean(advTabBtn && simpleTabBtn), 'both top-level page tabs exist in window switcher');
         advTabBtn.grab_focus();
