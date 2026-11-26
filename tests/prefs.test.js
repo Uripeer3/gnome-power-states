@@ -11,6 +11,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
+import { probeLoginSleepCapabilities } from '../lib/capabilities.js';
 import { SCHEMA_ID } from '../lib/configStore.js';
 import { UPOWER_DEVICE_STATE, UPOWER_WARNING } from '../lib/policyEngine.js';
 import {
@@ -1798,6 +1799,150 @@ function makeBaseCaps(overrides = {}) {
 
     ctrl.destroy();
     win.destroy();
+})();
+
+// =========================================================================
+// 15. Inhibited login1 capabilities, legacy *Known inference, pre-probe
+//     openAdvanced preservation, and locked extension idle key guardrails
+// =========================================================================
+(() => {
+    // 15a. probeLoginSleepCapabilities preserves 'inhibited' flags and UI displays them
+    let probedSleepCaps = null;
+    const fakeLoginProxy = {
+        g_name_owner: ':1.1',
+        CanSuspendRemote(cb) {
+            cb(['inhibited'], null);
+        },
+        CanHibernateRemote(cb) {
+            cb(['inhibited'], null);
+        },
+        CanHybridSleepRemote(cb) {
+            cb(['no'], null);
+        },
+        CanSuspendThenHibernateRemote(cb) {
+            cb(['challenge'], null);
+        },
+    };
+    probeLoginSleepCapabilities(fakeLoginProxy).then(res => {
+        probedSleepCaps = res;
+    });
+    drainEvents();
+
+    assertEqual(probedSleepCaps?.canSuspend, true, 'inhibited CanSuspend still marks canSuspend=true');
+    assertEqual(probedSleepCaps?.suspendInhibited, true, 'inhibited CanSuspend sets suspendInhibited=true');
+    assertEqual(probedSleepCaps?.hibernateInhibited, true, 'inhibited CanHibernate sets hibernateInhibited=true');
+    assertEqual(probedSleepCaps?.hybridSleepInhibited, false, 'no CanHybridSleep keeps hybridSleepInhibited=false');
+    assertEqual(
+        probedSleepCaps?.suspendThenHibernateRequiresAuth,
+        true,
+        'challenge CanSuspendThenHibernate sets requiresAuth=true'
+    );
+    assertEqual(
+        probedSleepCaps?.suspendThenHibernateInhibited,
+        false,
+        'challenge CanSuspendThenHibernate keeps inhibited=false'
+    );
+
+    const settings = makeMemoryExtSettings();
+    const gnomePower = makeFakeGnomePowerSettings();
+    const win = new Adw.PreferencesWindow();
+    const ctrl = new PreferencesWindowController(settings, win, {
+        gnomePowerSettings: gnomePower,
+        probeCapabilities: async () => ({
+            // Deliberately omit warningLevelKnown & percentageKnown to verify inference
+            lidIsPresent: true,
+            onBattery: true,
+            warningLevel: UPOWER_WARNING.LOW,
+            percentage: 12,
+            availableProfiles: ['power-saver', 'balanced'],
+            hasPowerProfiles: true,
+            ...probedSleepCaps,
+        }),
+    });
+    ctrl.initialize();
+    drainEvents();
+
+    const simple = ctrl.powerSourceController;
+    assertEqual(
+        simple._statusLabel.label,
+        'Currently on low battery',
+        'omitted warningLevelKnown is inferred from valid warningLevel so low battery status renders'
+    );
+    assertEqual(
+        simple._lidRow.subtitle,
+        'Currently inhibited',
+        'inhibited CanSuspend surfaces Currently inhibited on Power Source lid row'
+    );
+    assertEqual(
+        simple._idleActionRow.subtitle,
+        'Currently inhibited',
+        'inhibited CanSuspend surfaces Currently inhibited on Power Source idle row'
+    );
+
+    ctrl.destroy();
+    win.destroy();
+
+    // 15b. openAdvanced before async probe completes preserves requested state tab
+    const s2 = makeMemoryExtSettings();
+    let resolveProbe = null;
+    const win2 = new Adw.PreferencesWindow();
+    const ctrl2 = new PreferencesWindowController(s2, win2, {
+        gnomePowerSettings: makeFakeGnomePowerSettings(),
+        probeCapabilities: () =>
+            new Promise(resolve => {
+                resolveProbe = resolve;
+            }),
+    });
+    ctrl2.initialize();
+    ctrl2.openAdvanced('low-battery');
+    resolveProbe(makeBaseCaps({ onBattery: false }));
+    drainEvents();
+
+    assertEqual(
+        ctrl2.advancedController._selectedState,
+        'low-battery',
+        'openAdvanced state selection survives async capability probe completion'
+    );
+    ctrl2.destroy();
+    win2.destroy();
+
+    // 15c. commitIdleControl respects locked extension keys for low-battery idle settings
+    const s3 = makeMemoryExtSettings();
+    let lowBatWrites = 0;
+    const lockedExtSettings = {
+        get_string: k => s3.get_string(k),
+        get_int: k => s3.get_int(k),
+        get_boolean: k => s3.get_boolean(k),
+        set_string(k, v) {
+            lowBatWrites++;
+            return s3.set_string(k, v);
+        },
+        set_int(k, v) {
+            lowBatWrites++;
+            return s3.set_int(k, v);
+        },
+        is_writable: k => !k.startsWith('low-battery-idle-'),
+        connect: (sig, cb) => s3.connect(sig, cb),
+        disconnect: id => s3.disconnect(id),
+        bind: (...args) => s3.bind(...args),
+        list_keys: () => s3.list_keys(),
+        settings_schema: s3.settings_schema,
+    };
+    const win3 = new Adw.PreferencesWindow();
+    const ctrl3 = new PreferencesWindowController(lockedExtSettings, win3, {
+        gnomePowerSettings: makeFakeGnomePowerSettings(),
+        probeCapabilities: async () => makeBaseCaps({ onBattery: true }),
+    });
+    ctrl3.initialize();
+    drainEvents();
+    ctrl3.model.commitIdleControl('low-battery', 'both', {
+        actionId: 'suspend',
+        timeoutValue: 300,
+    });
+    drainEvents();
+    assertEqual(lowBatWrites, 0, 'commitIdleControl skips writes when low-battery extension keys are locked');
+    ctrl3.destroy();
+    win3.destroy();
 })();
 
 if (failed > 0) {
