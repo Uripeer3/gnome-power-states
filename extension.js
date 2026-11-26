@@ -75,6 +75,7 @@ export default class PowerStatesExtension extends Extension {
         this._lastPolicyState = null;
         this._lastLidPolicyState = null;
         this._manualOverrideActive = false;
+        this._deferredProfileOnHold = false;
         this._initialReconcilePending = true;
         this._undockDeadlineUs = 0;
         this._loginCapProbeGeneration = 0;
@@ -137,6 +138,7 @@ export default class PowerStatesExtension extends Extension {
                 }
             },
             onLapRetry: () => this._onLapRetry(),
+            onExternalHoldReleased: () => this._onExternalHoldReleased(),
             onBackendReady: () => {
                 if (this._initialized && this._upowerWatcher) {
                     this._reconcile(this._upowerWatcher.getReading(), {
@@ -285,6 +287,7 @@ export default class PowerStatesExtension extends Extension {
         this._lastPolicyState = null;
         this._lastLidPolicyState = null;
         this._manualOverrideActive = false;
+        this._deferredProfileOnHold = false;
         this._initialReconcilePending = false;
         this._undockDeadlineUs = 0;
     }
@@ -355,6 +358,25 @@ export default class PowerStatesExtension extends Extension {
             return;
 
         if (this._lastPolicyState === 'ac') {
+            this._reconcile(this._upowerWatcher.getReading(), {
+                forceProfile: true,
+                userEditedProfile: false,
+            });
+        }
+    }
+
+    _onExternalHoldReleased() {
+        if (
+            this._destroyed ||
+            !this._initialized ||
+            !this._deferredProfileOnHold ||
+            !this._upowerWatcher
+        ) {
+            return;
+        }
+
+        this._deferredProfileOnHold = false;
+        if (!this._manualOverrideActive) {
             this._reconcile(this._upowerWatcher.getReading(), {
                 forceProfile: true,
                 userEditedProfile: false,
@@ -483,7 +505,11 @@ export default class PowerStatesExtension extends Extension {
         if (this._profileController?.isAvailable) {
             const appHoldActive =
                 !userEditedProfile && this._profileController.hasExternalApplicationHold();
-            if (!appHoldActive) {
+            if (appHoldActive) {
+                if (stateChanged || effectiveForceProfile)
+                    this._deferredProfileOnHold = true;
+            } else {
+                this._deferredProfileOnHold = false;
                 const decision = resolveProfileTransition({
                     powerState: nextState,
                     lastPolicyState: previousState,

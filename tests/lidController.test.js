@@ -484,6 +484,8 @@ function makeFakeLoginProxy() {
 //    reply-before-echo ordering, rejection cleanup, legacy bus fallback, holds, lap-detected
 (() => {
     let externalChanges = 0;
+    let lapRetries = 0;
+    let holdReleases = 0;
     const applied = [];
     const dbusCalls = [];
 
@@ -494,7 +496,12 @@ function makeFakeLoginProxy() {
         onProfileApplied: (p, label) => {
             applied.push([p, label]);
         },
-        onLapRetry: () => {},
+        onLapRetry: () => {
+            lapRetries++;
+        },
+        onExternalHoldReleased: () => {
+            holdReleases++;
+        },
         dbusCall: (_entry, profile, done) => {
             dbusCalls.push({ profile, done });
         },
@@ -605,11 +612,62 @@ function makeFakeLoginProxy() {
     );
     assertEqual(externalChanges, 1, 'rejected write cleared expected echo');
 
-    // Boxed lap-detected Variant schedules retry timer
+    // Boxed lap-detected Variant schedules retry timer, and clearing to '' retries immediately
+    const lapBefore = lapRetries;
     prof._handlePropertiesChanged(
         makePropsChangedVariant({ PerformanceDegraded: new GLib.Variant('s', 'lap-detected') })
     );
     assertEqual(prof._lapDebounceId !== null, true, 'lap-detected Variant schedules retry timer');
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ PerformanceDegraded: new GLib.Variant('s', '') })
+    );
+    assertEqual(prof._lapDebounceId, null, 'clearing lap-detected cancels pending debounce timer');
+    assertEqual(lapRetries, lapBefore + 1, 'clearing lap-detected triggers immediate retry');
+
+    // External app hold acquisition & split-signal release (tuned-ppd style):
+    // 1. App acquires hold -> ActiveProfile change is NOT treated as manual override
+    const extHoldBefore = externalChanges;
+    const relBefore = holdReleases;
+    legacyEntry.proxy.ActiveProfileHolds = [
+        { ApplicationId: new GLib.Variant('s', 'com.feralinteractive.GameMode') },
+    ];
+    legacyEntry.proxy.ActiveProfile = 'performance';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({
+            ActiveProfileHolds: new GLib.Variant('aa{sv}', []),
+            ActiveProfile: new GLib.Variant('s', 'performance'),
+        })
+    );
+    assertEqual(externalChanges, extHoldBefore, 'app-hold ActiveProfile change is not manual override');
+
+    // 2. App releases hold (split signal: ActiveProfileHolds=[] first, then base_profile restore while our deferred write is in flight)
+    legacyEntry.proxy.ActiveProfileHolds = [];
+    prof._onExternalHoldReleased = () => {
+        holdReleases++;
+        prof.setProfile('balanced', { notifyStateLabel: 'On Battery' });
+    };
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfileHolds: new GLib.Variant('aa{sv}', []) })
+    );
+    assertEqual(holdReleases, relBefore + 1, 'hold release fires onExternalHoldReleased');
+    // Split-signal daemon restore of old base_profile arrives while deferred balanced write is in flight
+    legacyEntry.proxy.ActiveProfile = 'performance';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'performance') })
+    );
+    assertEqual(
+        externalChanges,
+        extHoldBefore,
+        'daemon base_profile restore after hold release is not treated as manual override'
+    );
+    dbusCalls[dbusCalls.length - 1].done(null);
+    legacyEntry.proxy.ActiveProfile = 'balanced';
+    prof._handlePropertiesChanged(
+        makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'balanced') })
+    );
+    prof._onExternalHoldReleased = () => {
+        holdReleases++;
+    };
 
     // Regression: Combined PropertiesChanged (ActiveProfile + PerformanceDegraded: '')
     // MUST still consume the expected echo so later manual selections are never misclassified!
@@ -623,7 +681,7 @@ function makeFakeLoginProxy() {
             PerformanceDegraded: new GLib.Variant('s', ''),
         })
     );
-    dbusCalls[5].done(null);
+    dbusCalls[dbusCalls.length - 1].done(null);
     assertEqual(applied.length, appBefore + 1, 'combined signal consumed extension echo once');
 
     // Now simulate two manual Quick Settings selections: balanced then performance
@@ -652,7 +710,7 @@ function makeFakeLoginProxy() {
     // _expectedEchoes & _lastCommittedTarget after timeout so a later manual click is detected!
     prof._echoExpireMs = 20;
     prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
-    dbusCalls[6].done(null); // Reply succeeded, NO PropertiesChanged ever emitted
+    dbusCalls[dbusCalls.length - 1].done(null); // Reply succeeded, NO PropertiesChanged ever emitted
     const expLoop = new GLib.MainLoop(null, false);
     GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
         expLoop.quit();
