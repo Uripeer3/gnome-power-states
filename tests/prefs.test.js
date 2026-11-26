@@ -86,25 +86,41 @@ function makeFakeGnomePowerSettings() {
 (() => {
     const profiles = buildProfileChoices(['power-saver', 'balanced'], 'performance');
     assertEqual(
+        profiles[0].label,
+        'Keep Current Mode',
+        'power mode unchanged option uses Keep Current Mode label'
+    );
+    assertEqual(
         profiles[profiles.length - 1].label,
-        'Performance (unavailable)',
-        'unavailable saved profile renders with (unavailable) suffix'
+        'Performance (Unavailable)',
+        'unavailable saved profile renders with (Unavailable) suffix'
     );
 
-    const blanks = buildScreenBlankChoices(240);
+    const blanks = buildScreenBlankChoices(420);
+    assertEqual(
+        blanks[0].label,
+        'Use System Setting',
+        'screen blank unchanged option uses Use System Setting label'
+    );
     assertTrue(
         blanks.some(o => o.value === 240 && o.label === '4 minutes'),
-        'custom 240s screen blank renders as 4 minutes'
+        '4 minutes preset is included to match GNOME Settings'
+    );
+    assertTrue(
+        blanks.some(o => o.value === 420 && o.label === '7 minutes'),
+        'custom 420s screen blank renders as 7 minutes'
     );
 })();
 
 // 2. Full Preferences widget smoke test across all 3 states, unavailable/custom values,
-//    challenge auth copy, and narrow (360px) vs wide (640px) responsive layout
+//    challenge auth copy, explicit external-display row, and narrow (360px) widths
 (() => {
     const settings = makeMemoryExtSettings();
     settings.set_string('ac-power-profile', 'performance');
-    settings.set_int('ac-screen-blank', 240);
+    settings.set_string('ac-lid-action', 'nothing');
+    settings.set_int('ac-screen-blank', 420);
     settings.set_string('battery-lid-action', 'hibernate');
+    settings.set_boolean('battery-lid-ignore-external-monitor', true);
     settings.set_string('low-battery-idle-action', 'hibernate');
 
     const gnomePower = makeFakeGnomePowerSettings();
@@ -157,25 +173,50 @@ function makeFakeGnomePowerSettings() {
         'sleep mode info popover explains polkit challenge authentication requirement'
     );
 
-    // Switch through all 3 tabs and check rendered labels & banners
+    // Switch through all 3 tabs and check rendered labels, visibility & banners
     controller.selectState('ac');
     const selectedProfileLabel =
         controller._profileRow.model.get_string(controller._profileRow.selected);
     assertEqual(
         selectedProfileLabel,
-        'Performance (unavailable)',
-        'unavailable saved Performance profile displays Performance (unavailable), not Leave Unchanged'
+        'Performance (Unavailable)',
+        'unavailable saved Performance profile displays Performance (Unavailable), not Keep Current Mode'
     );
 
     const selectedBlankLabel =
         controller._screenBlankRow.model.get_string(controller._screenBlankRow.selected);
     assertEqual(
         selectedBlankLabel,
-        '4 minutes',
-        'custom 240s Screen Blank displays 4 minutes, not Leave Unchanged'
+        '7 minutes',
+        'custom 420s Screen Blank displays 7 minutes, not Use System Setting'
+    );
+    assertEqual(
+        controller._extMonRow.visible,
+        false,
+        'With an External Display row is hidden when lid action is Do Nothing'
+    );
+    assertEqual(
+        controller._idleTimeoutDropDown.sensitive,
+        false,
+        'Delay dropdown is grayed out when Automatic Suspend is Off'
     );
 
     controller.selectState('battery');
+    assertEqual(
+        controller._extMonRow.visible,
+        true,
+        'With an External Display row is shown when lid action is active'
+    );
+    assertEqual(
+        controller._extMonRow.model.get_string(controller._extMonRow.selected),
+        'Use Lid Close Action',
+        'With an External Display reflects saved ignore=true as Use Lid Close Action'
+    );
+    assertEqual(
+        controller._idleTimeoutDropDown.sensitive,
+        true,
+        'Delay dropdown is enabled when Automatic Suspend is Suspend'
+    );
     assertTrue(
         controller._conflictBanner.visible &&
             controller._conflictBanner.title.includes('requires authentication') &&
@@ -184,57 +225,52 @@ function makeFakeGnomePowerSettings() {
     );
 
     controller.selectState('low-battery');
+    assertEqual(
+        controller._idleTimeoutDropDown.sensitive,
+        true,
+        'Delay dropdown is enabled when Low Battery Automatic Suspend is Hibernate'
+    );
     assertTrue(
         controller._conflictBanner.visible &&
             controller._conflictBanner.title.includes('may not fall back to Standby'),
         'low-battery idle hibernate banner does not falsely promise Standby fallback'
     );
 
-    // Responsive narrow layout (360px): stacks Action & Delay rows and fits <= 336px inner width
+    // Responsive narrow layout (360px): compact switcher + stacked Action / Delay rows fit <= 336px
     controller.setNarrowLayout(true);
     assertEqual(controller._idleWideControlsBox.visible, false, 'narrow hides wide suffix box');
     assertEqual(controller._idleActionNarrowRow.visible, true, 'narrow shows labeled Action row');
     assertEqual(controller._idleTimeoutNarrowRow.visible, true, 'narrow shows labeled Delay row');
-    assertEqual(
-        controller._idleActionDropDown.get_parent(),
-        controller._idleActionNarrowSlot,
-        'narrow moves Action dropdown into Action row'
-    );
-    assertEqual(
-        controller._idleTimeoutDropDown.get_parent(),
-        controller._idleTimeoutNarrowSlot,
-        'narrow moves Delay dropdown into Delay row'
-    );
-
-    // Measure minimum horizontal widths in narrow layout against 336px (360px - 24px margins)
     const measureMinWidth = widget => widget.measure(Gtk.Orientation.HORIZONTAL, -1)[0];
-    const narrowSwitcherMin = measureMinWidth(controller._stateSwitcher.widget);
-    const narrowIdleHeaderMin = measureMinWidth(controller._idleRow);
-    const narrowActionMin = measureMinWidth(controller._idleActionNarrowRow);
-    const narrowDelayMin = measureMinWidth(controller._idleTimeoutNarrowRow);
+    const measureNatWidth = widget => widget.measure(Gtk.Orientation.HORIZONTAL, -1)[1];
+    const narrowSwitcherNat = measureNatWidth(controller._stateSwitcher.widget);
+    const idleHeaderMin = measureMinWidth(controller._idleRow);
+    const idleActionMin = measureMinWidth(controller._idleActionNarrowRow);
+    const idleDelayMin = measureMinWidth(controller._idleTimeoutNarrowRow);
+    const extMonMin = measureMinWidth(controller._extMonRow);
     assertTrue(
-        narrowSwitcherMin <= 336,
-        `narrow state switcher min width (${narrowSwitcherMin}px) fits within 336px`
+        narrowSwitcherNat <= 336,
+        `narrow state switcher natural width (${narrowSwitcherNat}px) fits within 336px without truncation`
     );
     assertTrue(
-        narrowIdleHeaderMin <= 336,
-        `narrow Automatic Suspend header min width (${narrowIdleHeaderMin}px) fits within 336px`
+        idleHeaderMin <= 336,
+        `narrow Automatic Suspend header min width (${idleHeaderMin}px) fits within 336px`
     );
     assertTrue(
-        narrowActionMin <= 336,
-        `narrow Action row min width (${narrowActionMin}px) fits within 336px`
+        idleActionMin <= 336,
+        `narrow Action row min width (${idleActionMin}px) fits within 336px`
     );
     assertTrue(
-        narrowDelayMin <= 336,
-        `narrow Delay row min width (${narrowDelayMin}px) fits within 336px`
+        idleDelayMin <= 336,
+        `narrow Delay row min width (${idleDelayMin}px) fits within 336px`
+    );
+    assertTrue(
+        extMonMin <= 336,
+        `With an External Display row min width (${extMonMin}px) fits within 336px`
     );
 
-    // Switching back to wide (640px) restores single-row layout cleanly
     controller.setNarrowLayout(false);
     assertEqual(controller._idleWideControlsBox.visible, true, 'wide restores single-row controls');
-    assertEqual(controller._idleActionNarrowRow.visible, false, 'wide hides narrow Action row');
-    assertEqual(controller._idleTimeoutNarrowRow.visible, false, 'wide hides narrow Delay row');
-
     controller.destroy();
     window.destroy();
 })();

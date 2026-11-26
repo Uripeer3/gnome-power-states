@@ -14,7 +14,7 @@ import { PrefsController } from './lib/prefsController.js';
 export default class PowerStatesPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings(SCHEMA_ID);
-        window.set_default_size(640, 740);
+        window.set_default_size(640, 760);
 
         const page = new Adw.PreferencesPage({
             title: _('Power States'),

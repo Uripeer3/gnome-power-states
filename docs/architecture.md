@@ -145,7 +145,7 @@ Because a GNOME Shell extension cannot modify `gnome-control-center`, `gnome-set
 ### What Is Ready Now (Design Proposal)
 The **UI model and interaction philosophy** are in strong shape for a **GNOME Design proposal** (`Teams/Design/settings-mockups`) and discussion on `gnome-settings-daemon#715` and `gnome-control-center#1223`:
 - **Scoped `Adw.ToggleGroup` (`Plugged In | On Battery | Low Battery`)** keeps global settings global (solving KDE PowerDevil's 3× repetition of hardware controls) while making per-state behavior scannable in one Libadwaita page.
-- **Plain-language GNOME HIG copy**, **single-row Automatic Suspend** (with disabled Delay when Off), **positive clamshell phrasing** (*"Even With External Monitor Connected"*), and **opt-in `"Leave Unchanged"`** defaults fit GNOME's design culture well.
+- **Plain-language GNOME HIG copy**, **single-row Automatic Suspend** (with Delay grayed out when Off and stacking cleanly at narrow widths), **explicit external-display outcomes** (*"With an External Display"*: *Keep Running* / *Use Lid Close Action*), and **opt-in `"Keep Current Mode"` / `"Use System Setting"`** defaults fit GNOME's design culture well.
 - **"Transition defaults, not hard locks"** directly answers Bastien Nocera's objection in `gnome-control-center#1600` (that users plugged into AC may still want quiet operation or manual overrides without the system fighting them).
 
 ### What Should Happen Before Filing Upstream Code MRs

@@ -19,11 +19,11 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 ## Features (v1)
 
 ### Per-State Policies (`Plugged In` | `On Battery` | `Low Battery`)
-- **Power Mode**: Automatically switch between *Performance*, *Balanced*, *Power Saver*, or *Leave Unchanged* via `power-profiles-daemon` or `tuned-ppd`.
+- **Power Mode**: Automatically switch between *Performance*, *Balanced*, *Power Saver*, or *Keep Current Mode* via `power-profiles-daemon` or `tuned-ppd`.
 - **When Laptop Lid Closes (Zero Root)**: Choose *Suspend*, *Do Nothing*, *Lock Screen*, *Turn Off Screen*, or *Hibernate* independently per power state using an unprivileged `systemd-logind` `handle-lid-switch` session inhibitor.
-- **Clamshell / External Monitor Awareness**: Each state includes an *"Even With External Monitor Connected"* toggle (off by default, so closing the lid while docked stays awake unless you explicitly opt in).
-- **Automatic Suspend (Synced with GNOME Settings)**: Single compact row (`Action` + `Delay`) synced directly with GNOME's native `org.gnome.settings-daemon.plugins.power` keys (`sleep-inactive-ac-*` and `sleep-inactive-battery-*`), plus an optional temporary override while in *Low Battery* that restores cleanly on exit.
-- **Screen Blank Delay**: Per-state `org.gnome.desktop.session` `idle-delay` (optional; defaults to *Leave Unchanged* and restores your original baseline if the extension is disabled).
+- **Clamshell / External Display Awareness**: Each active lid policy includes a *"With an External Display"* choice (*Keep Running* by default, or *Use Lid Close Action*), hidden automatically when lid close is *Do Nothing*.
+- **Automatic Suspend (Synced with GNOME Settings)**: Compact side-by-side `Action` + `Delay` controls (stacking cleanly on narrow screens) synced directly with GNOME's `org.gnome.settings-daemon.plugins.power` keys (`sleep-inactive-ac-*` and `sleep-inactive-battery-*`), plus an optional temporary override while in *Low Battery* that restores cleanly on exit.
+- **Screen Blank Delay**: Per-state `org.gnome.desktop.session` `idle-delay` (optional; defaults to *Use System Setting* and restores your original baseline if the extension is disabled).
 
 ### General & Advanced
 - **Separated Sleep Mode**: *"Lid-Close Sleep Mode"* (*Standby (RAM)*, *Suspend, then Hibernate*, or *Hybrid Sleep*) is configured once globally and transparently explains when Hibernate / Hybrid Sleep are not configured on the system.
