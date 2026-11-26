@@ -812,11 +812,29 @@ function makeFakeLoginProxy() {
 
     // Fresh offline->online AC replug edge immediately overrides lagging OnBattery+Discharging
     // so an armed closed-lid unplug grace timer cancels immediately on replug!
-    watcher._freshAcEdgeUntilUs = GLib.get_monotonic_time() + 2_000_000;
+    watcher._armFreshAcEdge(20);
     const replugReading = watcher.getReading();
     assertEqual(replugReading.known, true, 'fresh AC plug-in edge is known');
     assertEqual(replugReading.onBattery, false, 'fresh AC plug-in edge resolves to AC immediately');
-    watcher._freshAcEdgeUntilUs = 0;
+
+    // If it was a glitch (DisplayDevice stayed Discharging), expiry re-emits battery immediately!
+    const expiryReadings = [];
+    watcher._ready = true;
+    watcher._onChange = r => expiryReadings.push(r);
+    const edgeLoop = new GLib.MainLoop(null, false);
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+        edgeLoop.quit();
+        return GLib.SOURCE_REMOVE;
+    });
+    edgeLoop.run();
+    assertEqual(expiryReadings.length, 1, 'expired fresh AC edge triggers one re-emit');
+    assertEqual(
+        expiryReadings[0]?.onBattery,
+        true,
+        'expired glitch AC edge snaps back to battery without waiting for DisplayDevice tick'
+    );
+    watcher._ready = false;
+    watcher._onChange = () => {};
 
     // Heavy load discharging while genuinely plugged in (non-USB-PD AC online + root OnBattery=false) stays AC
     watcher._upowerProxy.OnBattery = false;
