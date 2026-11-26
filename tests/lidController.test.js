@@ -818,13 +818,46 @@ function makeFakeLoginProxy() {
     assertEqual(replugReading.onBattery, false, 'fresh AC plug-in edge resolves to AC immediately');
     watcher._freshAcEdgeUntilUs = 0;
 
-    // Heavy load discharging while genuinely plugged in (root OnBattery=false) stays AC
+    // Heavy load discharging while genuinely plugged in (non-USB-PD AC online + root OnBattery=false) stays AC
     watcher._upowerProxy.OnBattery = false;
     assertEqual(
         watcher.getReading().onBattery,
         false,
-        'discharging battery alone does not override online AC when UPower.OnBattery is false'
+        'discharging battery alone does not override online Mains AC when UPower.OnBattery is false'
     );
+
+    // Stuck ThinkPad USB-C UCSI port: line_power_AC offline, ucsi_source_psy stuck Online=true,
+    // which fools UPower root into OnBattery=false, while DisplayDevice.State is Discharging!
+    watcher._linePowerDevices.get('/ac0').proxy.Online = false;
+    watcher._linePowerDevices.get('/ac1').proxy.Online = false;
+    watcher._linePowerDevices.set('/org/freedesktop/UPower/devices/line_power_ucsi_source_psy_USBC000o002', {
+        proxy: { g_name_owner: ':1.55', Online: true, disconnect() {} },
+        propId: null,
+        lastOnline: true,
+    });
+    const stuckUcsi = watcher.getReading();
+    assertEqual(stuckUcsi.known, true, 'stuck UCSI + discharging DisplayDevice is known');
+    assertEqual(
+        stuckUcsi.onBattery,
+        true,
+        'stuck UCSI online adapter overridden by discharging DisplayDevice even when UPower.OnBattery is fooled to false'
+    );
+
+    // Same stuck UCSI + offline Mains AC, but DisplayDevice state unknown -> incomplete (never fabricate AC)
+    watcher._displayProxy.State = 0;
+    assertEqual(
+        watcher.getReading().known,
+        false,
+        'stuck UCSI contradicting offline Mains AC with unknown DisplayDevice reports known=false'
+    );
+
+    // Real USB-C charging (DisplayDevice Charging) on a UCSI-only machine resolves to AC
+    watcher._displayProxy.State = 1; // CHARGING
+    const realUsbC = watcher.getReading();
+    assertEqual(realUsbC.known, true, 'charging UCSI adapter is known');
+    assertEqual(realUsbC.onBattery, false, 'charging UCSI adapter resolves to AC');
+
+    watcher._linePowerDevices.delete('/org/freedesktop/UPower/devices/line_power_ucsi_source_psy_USBC000o002');
     watcher._displayProxy.State = 0;
 
     // DeviceRemoved invalidates any in-flight attachment token for that path

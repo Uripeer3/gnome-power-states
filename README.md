@@ -30,7 +30,7 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 - **Low Battery Level**: Simple *Default (X%)* (follows UPower's system threshold) or *Custom* percentage (extension-only; does not edit `/etc/UPower/UPower.conf` or GNOME's system alerts).
 - **Advanced (collapsed by default)**: *Unplug Delay When Closed* (*Default (3s)* or *Custom* extension-only timer), *Transition Notifications*, and *Pause Media on Suspend*.
 - **Contextual Conflict Guardrails**: Surfaces an inline `Adw.Banner` in Preferences only when settings conflict (e.g., Screen Blank set at or after Automatic Suspend, or Battery Lid set to *Do Nothing*).
-- **Reliable AC Detection**: Subscribes to **all** UPower `LINE_POWER` devices (plus hotplug events) alongside `DisplayDevice`, avoiding missed AC reconnects on laptops with battery charge thresholds or multiple USB-C PD ports.
+- **Reliable AC Detection**: Subscribes to **all** UPower `LINE_POWER` devices (plus hotplug events) alongside `DisplayDevice`, avoiding missed AC reconnects on laptops with battery charge thresholds or multiple USB-C PD ports and recovering cleanly when a USB-C PD (`ucsi`/`tcpm`) sensor sticks online after unplug.
 
 ---
 
