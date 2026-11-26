@@ -6,6 +6,7 @@
 // Run with: gjs -m tests/prefs.test.js (or xvfb-run -a gjs -m tests/prefs.test.js)
 
 import Adw from 'gi://Adw';
+import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
@@ -17,8 +18,13 @@ import {
     buildProfileChoices,
     buildScreenBlankChoices,
 } from '../lib/prefsController.js';
+import {
+    describeCurrentPowerStatus,
+    describeLowBatterySummary,
+} from '../lib/prefsModel.js';
 import { PreferencesWindowController } from '../lib/prefsWindow.js';
 import { PowerStatesRuntime } from '../lib/runtime.js';
+import { UPowerWatcher } from '../lib/upowerWatcher.js';
 
 let passed = 0;
 let failed = 0;
@@ -53,6 +59,22 @@ function drainEvents() {
         while (ctx.pending())
             ctx.iteration(false);
     }
+}
+
+function waitForWindowLayout(win, widget, { minMs = 40, maxMs = 500 } = {}) {
+    const ctx = GLib.MainContext.default();
+    const start = GLib.get_monotonic_time();
+    const minEnd = start + minMs * 1000;
+    const deadline = start + maxMs * 1000;
+    while (GLib.get_monotonic_time() < deadline) {
+        while (ctx.pending())
+            ctx.iteration(false);
+        const now = GLib.get_monotonic_time();
+        if (now >= minEnd && win.get_mapped() && widget.get_mapped() && widget.get_width() > 0)
+            break;
+        GLib.usleep(5000);
+    }
+    drainEvents();
 }
 
 function getStringList(model) {
@@ -1030,6 +1052,750 @@ function makeBaseCaps(overrides = {}) {
     ctrl.destroy();
     win.destroy();
     runtime.disable();
+})();
+
+// =========================================================================
+// 10. Low-battery inherited idle delay shows effective native delay (or omits
+//     row when inheriting Off) and preserves stored independent delay on edit
+// =========================================================================
+(() => {
+    const settings = makeMemoryExtSettings();
+    settings.set_string('low-battery-idle-action', 'unchanged');
+    settings.set_int('low-battery-idle-timeout', 480); // Stored independent 8 min
+
+    const gnomePower = makeFakeGnomePowerSettings({
+        'sleep-inactive-ac-type': 'nothing',
+        'sleep-inactive-ac-timeout': 3600,
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 900, // Native 15 min
+    });
+
+    const win = new Adw.PreferencesWindow();
+    const ctrl = new PreferencesWindowController(settings, win, {
+        gnomePowerSettings: gnomePower,
+        probeCapabilities: async () => makeBaseCaps({ onBattery: true }),
+    });
+    ctrl.initialize();
+    drainEvents();
+
+    const simple = ctrl.powerSourceController;
+    simple._lowBatteryExpander.expanded = true;
+
+    // Inheriting native 15 min must display 15 min (not stored local 8 min)
+    assertEqual(simple._lowIdleTimeoutRow.visible, true, 'inherited active delay row is visible');
+    assertEqual(simple._lowIdleTimeoutRow.sensitive, false, 'inherited active delay row is disabled');
+    assertEqual(
+        getSelectedLabel(simple._lowIdleTimeoutRow),
+        'After 15 min',
+        'inherited low-battery delay shows actual effective native 15 min instead of local 8 min'
+    );
+    assertEqual(
+        simple._lowIdleTimeoutRow.subtitle,
+        'Inherited from On Battery',
+        'inherited delay row explains inheritance'
+    );
+    assertEqual(
+        settings.get_int('low-battery-idle-timeout'),
+        480,
+        'displaying inherited delay never overwrites stored independent 480s delay'
+    );
+
+    // Updating native battery timeout live updates inherited display without altering stored delay
+    gnomePower.set_int('sleep-inactive-battery-timeout', 1200);
+    drainEvents();
+    assertEqual(
+        getSelectedLabel(simple._lowIdleTimeoutRow),
+        'After 20 min',
+        'inherited low-battery delay tracks native battery timeout update to 20 min'
+    );
+    assertEqual(
+        settings.get_int('low-battery-idle-timeout'),
+        480,
+        'tracking native timeout update preserves stored independent 480s delay'
+    );
+
+    // Switching low-battery action from Same as Battery to Suspend restores stored 8 min delay
+    selectByLabel(simple._lowIdleActionRow, 'Suspend');
+    drainEvents();
+    assertEqual(settings.get_string('low-battery-idle-action'), 'suspend', 'low-battery action set to suspend');
+    assertEqual(
+        settings.get_int('low-battery-idle-timeout'),
+        480,
+        'action edit from inherited to Suspend preserves stored independent 480s delay'
+    );
+    assertEqual(simple._lowIdleTimeoutRow.sensitive, true, 'explicit Suspend enables low-battery delay row');
+    assertEqual(
+        getSelectedLabel(simple._lowIdleTimeoutRow),
+        'After 8 min',
+        'explicit Suspend displays preserved stored independent 8 min delay'
+    );
+
+    // Switching back to inherited when On Battery is Off omits the delay row
+    selectByLabel(simple._lowIdleActionRow, 'Same as Battery (Suspend)');
+    drainEvents();
+    gnomePower.set_string('sleep-inactive-battery-type', 'nothing');
+    drainEvents();
+    assertEqual(
+        simple._lowIdleTimeoutRow.visible,
+        false,
+        'low-battery Suspend Delay row is omitted when inheriting Off from On Battery'
+    );
+    assertEqual(
+        getSelectedLabel(simple._lowIdleActionRow),
+        'Same as Battery (Off)',
+        'low-battery action choice accurately displays Same as Battery (Off)'
+    );
+
+    // Switching back to explicit Suspend re-shows row with preserved 8 min delay
+    selectByLabel(simple._lowIdleActionRow, 'Suspend');
+    drainEvents();
+    assertEqual(simple._lowIdleTimeoutRow.visible, true, 'explicit Suspend re-shows delay row');
+    assertEqual(
+        getSelectedLabel(simple._lowIdleTimeoutRow),
+        'After 8 min',
+        'preserved independent 8 min delay survives Off-inheritance round trip'
+    );
+
+    ctrl.destroy();
+    win.destroy();
+})();
+
+// =========================================================================
+// 11. Low-battery summary: simultaneous lid + external-display diffs &
+//     honest capability reporting (never overpromises unavailable sleep)
+// =========================================================================
+(() => {
+    const baseBattery = {
+        powerProfile: 'balanced',
+        lidAction: 'suspend',
+        lidIgnoreExternalMonitor: false,
+        screenBlank: -1,
+        idleAction: 'unchanged',
+        idleTimeout: 900,
+    };
+    const baseGlobal = {
+        sleepMode: 'suspend',
+        lowBatteryMode: 'upower',
+        lowBatteryPercentage: 20,
+    };
+    const baseIdle = { action: 'suspend', timeout: 900 };
+
+    // Simultaneous lid action AND external-display difference (Keep Running -> Use Lid Close Action)
+    const bothDiff1 = describeLowBatterySummary({
+        batteryConfig: baseBattery,
+        lowBatteryConfig: {
+            ...baseBattery,
+            lidAction: 'lock',
+            lidIgnoreExternalMonitor: true,
+        },
+        batteryExactIdle: baseIdle,
+        globalConfig: baseGlobal,
+        capabilities: makeBaseCaps(),
+    });
+    assertTrue(
+        bothDiff1.includes('Lid: Lock Screen') &&
+            bothDiff1.includes('External display: Use Lid Close Action'),
+        `simultaneous lid + external-display diff keeps both entries (got "${bothDiff1}")`
+    );
+
+    // Simultaneous reverse diff (Use Lid Close Action -> Keep Running)
+    const bothDiff2 = describeLowBatterySummary({
+        batteryConfig: { ...baseBattery, lidIgnoreExternalMonitor: true },
+        lowBatteryConfig: {
+            ...baseBattery,
+            lidAction: 'lock',
+            lidIgnoreExternalMonitor: false,
+        },
+        batteryExactIdle: baseIdle,
+        globalConfig: baseGlobal,
+        capabilities: makeBaseCaps(),
+    });
+    assertTrue(
+        bothDiff2.includes('Lid: Lock Screen') &&
+            bothDiff2.includes('External display: Keep Running'),
+        `simultaneous reverse lid + external-display diff keeps both entries (got "${bothDiff2}")`
+    );
+
+    // Hidden stale external-display bool on Battery Do Nothing does not create false diff
+    const staleBoolSummary = describeLowBatterySummary({
+        batteryConfig: { ...baseBattery, lidAction: 'nothing', lidIgnoreExternalMonitor: true },
+        lowBatteryConfig: {
+            ...baseBattery,
+            lidAction: 'suspend',
+            lidIgnoreExternalMonitor: false,
+        },
+        batteryExactIdle: baseIdle,
+        globalConfig: baseGlobal,
+        capabilities: makeBaseCaps(),
+    });
+    assertTrue(
+        staleBoolSummary.includes('Lid: Suspend') &&
+            !staleBoolSummary.includes('External display:'),
+        `stale hidden external-display bool under Do Nothing is ignored (got "${staleBoolSummary}")`
+    );
+
+    // Unavailable hibernate idle override does not overpromise Hibernate
+    const unavailHibSummary = describeLowBatterySummary({
+        batteryConfig: baseBattery,
+        lowBatteryConfig: { ...baseBattery, idleAction: 'hibernate', idleTimeout: 300 },
+        batteryExactIdle: baseIdle,
+        globalConfig: baseGlobal,
+        capabilities: makeBaseCaps({ canHibernate: false, hibernateRequiresAuth: false }),
+    });
+    assertTrue(
+        unavailHibSummary.includes('Hibernate (Unavailable) after 5 minutes'),
+        `unavailable hibernate summary marks (Unavailable) (got "${unavailHibSummary}")`
+    );
+
+    // Auth-required hibernate idle override marks (Requires Auth)
+    const authHibSummary = describeLowBatterySummary({
+        batteryConfig: baseBattery,
+        lowBatteryConfig: { ...baseBattery, idleAction: 'hibernate', idleTimeout: 300 },
+        batteryExactIdle: baseIdle,
+        globalConfig: baseGlobal,
+        capabilities: makeBaseCaps({ canHibernate: false, hibernateRequiresAuth: true }),
+    });
+    assertTrue(
+        authHibSummary.includes('Hibernate (Requires Auth) after 5 minutes'),
+        `auth-required hibernate summary marks (Requires Auth) (got "${authHibSummary}")`
+    );
+
+    // Unavailable suspend idle & lid overrides do not overpromise Suspend
+    const unavailSuspSummary = describeLowBatterySummary({
+        batteryConfig: { ...baseBattery, lidAction: 'lock' },
+        lowBatteryConfig: {
+            ...baseBattery,
+            lidAction: 'suspend',
+            lidIgnoreExternalMonitor: true,
+            idleAction: 'suspend',
+            idleTimeout: 300,
+        },
+        batteryExactIdle: { action: 'nothing', timeout: 900 },
+        globalConfig: baseGlobal,
+        capabilities: makeBaseCaps({
+            canSuspend: false,
+            suspendRequiresAuth: false,
+            canHibernate: false,
+            canHybridSleep: false,
+            canSuspendThenHibernate: false,
+        }),
+    });
+    assertTrue(
+        unavailSuspSummary.includes('Lid: Suspend (Unavailable)') &&
+            unavailSuspSummary.includes('Suspend (Unavailable) after 5 minutes') &&
+            !unavailSuspSummary.includes('External display:'),
+        `unavailable suspend summary marks (Unavailable) and omits inactive external-display claim (got "${unavailSuspSummary}")`
+    );
+})();
+
+// =========================================================================
+// 12. Factual status caption, explicit selector label, contextual Power Mode
+//     guidance, reduced redundant subtitles, preserved conflict explanations
+// =========================================================================
+(() => {
+    // Pure helper checks: concise factual current source only
+    assertEqual(describeCurrentPowerStatus({ powerState: null }), null, 'unknown status returns null');
+    assertEqual(
+        describeCurrentPowerStatus({ powerState: 'ac' }).text,
+        'Currently plugged in',
+        'AC status is concise factual Currently plugged in'
+    );
+    assertEqual(
+        describeCurrentPowerStatus({ powerState: 'battery' }).text,
+        'Currently on battery',
+        'Battery status is concise factual Currently on battery'
+    );
+    assertEqual(
+        describeCurrentPowerStatus({ powerState: 'low-battery' }).text,
+        'Currently on low battery',
+        'Low battery status is concise factual Currently on low battery'
+    );
+
+    const settings = makeMemoryExtSettings();
+    const gnomePower = makeFakeGnomePowerSettings();
+    const win = new Adw.PreferencesWindow();
+    const ctrl = new PreferencesWindowController(settings, win, {
+        gnomePowerSettings: gnomePower,
+        probeCapabilities: async () => makeBaseCaps({ onBattery: false }),
+    });
+    ctrl.initialize();
+    drainEvents();
+
+    const simple = ctrl.powerSourceController;
+
+    // Clear visible selector heading + factual live status (never stale 'changes here apply...')
+    assertEqual(simple._sourceHeadingLabel.visible, true, 'editor selector heading is visible');
+    assertEqual(simple._sourceHeadingLabel.label, 'Edit Settings For', 'editor selector heading text');
+    assertEqual(simple._statusLabel.label, 'Currently plugged in', 'AC live caption is concise factual');
+    simple.selectSource('battery', { userInitiated: true });
+    assertEqual(
+        simple._statusLabel.label,
+        'Currently plugged in',
+        'live caption stays concise factual Currently plugged in while editing On Battery'
+    );
+
+    // Contextual Power Mode guidance below Power Mode row (no standalone generic group description,
+    // and keeps ComboRow subtitle empty so selected mode value never truncates at 360px)
+    assertEqual(
+        simple._profileGroup.description ?? '',
+        '',
+        'removed generic standalone Applied when switching paragraph from Power Mode group'
+    );
+    assertEqual(
+        simple._profileRow.subtitle,
+        '',
+        'healthy Power Mode row keeps subtitle empty so value stays untruncated at narrow widths'
+    );
+    assertTrue(
+        simple._profileGuidanceLabel.visible &&
+            simple._profileGuidanceLabel.label.includes('Quick Settings') &&
+            simple._profileGuidanceLabel.label.toLowerCase().includes('low battery'),
+        `Power Mode contextual guidance explains manual choice including low battery (got "${simple._profileGuidanceLabel.label}")`
+    );
+    assertEqual(
+        simple._lowProfileRow.subtitle,
+        '',
+        'nested low-battery Power Mode row avoids duplicating guidance'
+    );
+
+    // Reduced redundant subtitles on healthy controls
+    assertEqual(simple._extMonRow.subtitle, '', 'removed redundant When docked subtitle on main row');
+    assertEqual(simple._lowExtMonRow.subtitle, '', 'removed redundant When docked subtitle on low-battery row');
+    assertEqual(simple._lidRow.subtitle, '', 'healthy Suspend lid row has no redundant filler subtitle');
+    assertEqual(simple._idleActionRow.subtitle, '', 'healthy Suspend idle row has no redundant filler subtitle');
+    assertEqual(
+        simple._screenBlankRow.subtitle,
+        'Does not lock',
+        'Screen Blank distinguishes blanking from locking concisely'
+    );
+    selectByLabel(simple._screenBlankRow, 'Never');
+    drainEvents();
+    assertEqual(simple._screenBlankRow.subtitle, '', 'Screen Blank Never has no redundant subtitle');
+
+    // Preserved useful conflict explanations
+    selectByLabel(simple._screenBlankRow, '15 minutes'); // Equals native 900s suspend timeout
+    drainEvents();
+    assertTrue(
+        simple._screenBlankRow.subtitle.includes('Computer suspends first'),
+        `blank-after-suspend conflict explanation preserved (got "${simple._screenBlankRow.subtitle}")`
+    );
+
+    selectByLabel(simple._lidRow, 'Do Nothing');
+    drainEvents();
+    assertTrue(
+        simple._lidRow.subtitle.includes('heat buildup'),
+        `battery lid Do Nothing safety warning preserved (got "${simple._lidRow.subtitle}")`
+    );
+
+    selectByLabel(simple._lidRow, 'Turn Off Screen');
+    drainEvents();
+    assertTrue(
+        simple._lidRow.subtitle.includes('Does not sleep or lock'),
+        `lid Turn Off Screen non-locking explanation preserved (got "${simple._lidRow.subtitle}")`
+    );
+
+    ctrl.destroy();
+    win.destroy();
+})();
+
+// =========================================================================
+// 13. Real UPowerWatcher disconnect (onOwnerChanged(false)) clears stale
+//     live caption and reconnect restores it without stale low-battery flags
+// =========================================================================
+(() => {
+    const settings = makeMemoryExtSettings();
+    const gnomePower = makeFakeGnomePowerSettings();
+
+    let notifyOwnerCb = null;
+    let watcherInstance = null;
+    const fakeUpowerProxy = {
+        g_name_owner: ':1.99',
+        OnBattery: true,
+        LidIsPresent: true,
+        LidIsClosed: false,
+        connect(sig, cb) {
+            if (sig === 'notify::g-name-owner')
+                notifyOwnerCb = cb;
+            return 1;
+        },
+        disconnect() {},
+        connectSignal() {
+            return 2;
+        },
+        disconnectSignal() {},
+        EnumerateDevicesRemote(cb) {
+            cb([[]], null);
+        },
+    };
+    const fakeDisplayProxy = {
+        g_name_owner: ':1.99',
+        State: UPOWER_DEVICE_STATE.DISCHARGING,
+        WarningLevel: UPOWER_WARNING.LOW,
+        Percentage: 11,
+        connect() {
+            return 1;
+        },
+        disconnect() {},
+    };
+
+    const win = new Adw.PreferencesWindow();
+    const ctrl = new PreferencesWindowController(settings, win, {
+        gnomePowerSettings: gnomePower,
+        probeCapabilities: async () =>
+            makeBaseCaps({
+                onBattery: true,
+                warningLevel: UPOWER_WARNING.LOW,
+                warningLevelKnown: true,
+                percentage: 11,
+                percentageKnown: true,
+            }),
+        createPowerWatcher: (onChange, onOwnerChanged) => {
+            watcherInstance = new UPowerWatcher(onChange, null, onOwnerChanged);
+            // Wire UPowerWatcher's real owner-change lifecycle without hitting system D-Bus
+            watcherInstance.initialize = async () => {
+                watcherInstance._upowerProxy = fakeUpowerProxy;
+                watcherInstance._displayProxy = fakeDisplayProxy;
+                watcherInstance._upowerOwnerId = fakeUpowerProxy.connect(
+                    'notify::g-name-owner',
+                    () => {
+                        if (watcherInstance._destroyed)
+                            return;
+                        const connected = Boolean(watcherInstance._upowerProxy?.g_name_owner);
+                        if (!connected) {
+                            for (const p of Array.from(watcherInstance._linePowerDevices.keys()))
+                                watcherInstance._detachLinePower(p);
+                            watcherInstance._onOwnerChanged?.(false);
+                        } else {
+                            watcherInstance._onOwnerChanged?.(true);
+                            watcherInstance._emitChange();
+                        }
+                    }
+                );
+                watcherInstance._ready = true;
+            };
+            return watcherInstance;
+        },
+    });
+
+    ctrl.initialize();
+    drainEvents();
+
+    const simple = ctrl.powerSourceController;
+    assertEqual(simple._statusBox.visible, true, 'live caption visible before UPower disconnect');
+    assertEqual(simple._statusLabel.label, 'Currently on low battery', 'initial live caption is low battery');
+    assertTrue(typeof notifyOwnerCb === 'function', 'UPowerWatcher registered notify::g-name-owner');
+
+    // Simulate UPower daemon disappearing: g_name_owner becomes null -> onOwnerChanged(false)
+    fakeUpowerProxy.g_name_owner = null;
+    fakeDisplayProxy.g_name_owner = null;
+    notifyOwnerCb();
+    drainEvents();
+
+    assertEqual(
+        simple._statusBox.visible,
+        false,
+        'UPower disconnect clears and hides stale live caption'
+    );
+    assertEqual(simple._statusLabel.label, '', 'UPower disconnect clears live status label text');
+    assertEqual(
+        ctrl.model.capabilities.warningLevelKnown,
+        false,
+        'UPower disconnect resets warningLevelKnown so reconnect does not reuse stale low-battery state'
+    );
+
+    // Simulate UPower returning with normal battery reading (not low battery)
+    fakeUpowerProxy.g_name_owner = ':1.100';
+    fakeDisplayProxy.g_name_owner = ':1.100';
+    fakeDisplayProxy.WarningLevel = UPOWER_WARNING.NONE;
+    fakeDisplayProxy.Percentage = 72;
+    notifyOwnerCb();
+    drainEvents();
+
+    assertEqual(simple._statusBox.visible, true, 'UPower reconnect restores live caption');
+    assertEqual(
+        simple._statusLabel.label,
+        'Currently on battery',
+        'UPower reconnect displays fresh Currently on battery caption'
+    );
+
+    ctrl.destroy();
+    win.destroy();
+})();
+
+// =========================================================================
+// 14. Keyboard navigation, focus stability on source change, screen-reader
+//     metadata, fallback switcher, and 360px + large text measurements
+// =========================================================================
+(() => {
+    const settings = makeMemoryExtSettings();
+    settings.set_string('ac-power-profile', 'performance'); // Unavailable on simulated HW -> forces model change between AC & Battery
+    settings.set_string('battery-power-profile', 'balanced');
+
+    const gnomePower = makeFakeGnomePowerSettings();
+    const win = new Adw.PreferencesWindow();
+    win.set_default_size(640, 760);
+
+    const ctrl = new PreferencesWindowController(settings, win, {
+        gnomePowerSettings: gnomePower,
+        probeCapabilities: async () =>
+            makeBaseCaps({
+                onBattery: false,
+                availableProfiles: ['power-saver', 'balanced'],
+            }),
+    });
+    ctrl.initialize();
+    win.present();
+    waitForWindowLayout(win, ctrl.powerSourceController._profileRow);
+
+    const simple = ctrl.powerSourceController;
+    const adv = ctrl.advancedController;
+
+    // 14a. Accessible roles on live status and decorative icons
+    assertEqual(
+        simple._statusBox.accessible_role,
+        Gtk.AccessibleRole.STATUS,
+        'live status container uses STATUS accessible role'
+    );
+    assertEqual(
+        simple._statusIcon.accessible_role,
+        Gtk.AccessibleRole.PRESENTATION,
+        'decorative status icon uses PRESENTATION accessible role'
+    );
+
+    // 14b. Changing source programmatically never steals focus (even when row model updates)
+    simple._profileRow.grab_focus();
+    drainEvents();
+    assertEqual(win.get_focus(), simple._profileRow, 'focus placed on Power Mode row');
+    simple.selectSource('battery', { userInitiated: true });
+    drainEvents();
+    assertEqual(
+        win.get_focus(),
+        simple._profileRow,
+        'changing source while model updates never steals focus from Power Mode row'
+    );
+
+    // Changing source while on Advanced tab keeps focus on Advanced tab
+    ctrl.openAdvanced('ac');
+    drainEvents();
+    adv._profileRow.grab_focus();
+    drainEvents();
+    simple.selectSource('ac', { userInitiated: true });
+    drainEvents();
+    assertEqual(
+        win.get_focus(),
+        adv._profileRow,
+        'changing source on Power Source page never steals focus from Advanced page'
+    );
+
+    // 14c. Native GTK keyboard navigation inside ToggleGroup, rows, expander, and tabs
+    const gtkSettings = Gtk.Settings.get_default();
+    const prevAnimations = gtkSettings?.gtk_enable_animations;
+    if (gtkSettings)
+        gtkSettings.gtk_enable_animations = false;
+
+    try {
+        ctrl.openPowerSourceSettings('battery');
+        waitForWindowLayout(win, simple._lidRow);
+
+        const toggleButtons = [];
+        for (let c = simple._sourceSwitcher.widget.get_first_child(); c; c = c.get_next_sibling()) {
+            if (c instanceof Gtk.ToggleButton)
+                toggleButtons.push(c);
+        }
+        assertEqual(toggleButtons.length, 2, 'source switcher exposes 2 toggle buttons');
+
+        // Focus On Battery toggle -> Right arrow moves to Plugged In -> activate keeps focus on Plugged In
+        toggleButtons[0].grab_focus();
+        drainEvents();
+        simple._sourceSwitcher.widget.child_focus(Gtk.DirectionType.RIGHT);
+        drainEvents();
+        assertEqual(win.get_focus(), toggleButtons[1], 'Right arrow moves keyboard focus to Plugged In toggle');
+        toggleButtons[1].emit('clicked');
+        drainEvents();
+        assertEqual(simple.editingSource, 'ac', 'activating Plugged In toggle switches editing source to ac');
+        assertEqual(win.get_focus(), toggleButtons[1], 'activating Plugged In toggle keeps focus on it');
+
+        // Back to On Battery via Left arrow + activate
+        simple._sourceSwitcher.widget.child_focus(Gtk.DirectionType.LEFT);
+        drainEvents();
+        toggleButtons[0].emit('clicked');
+        waitForWindowLayout(win, simple._lowBatteryExpander);
+        assertEqual(simple.editingSource, 'battery', 'activating On Battery toggle switches back to battery');
+        assertEqual(win.get_focus(), toggleButtons[0], 'activating On Battery toggle keeps focus on it');
+
+        // Tab forward from switcher visits expected rows in order and reaches When Battery Is Low
+        const tabRows = [];
+        for (let i = 0; i < 10; i++) {
+            win.child_focus(Gtk.DirectionType.TAB_FORWARD);
+            drainEvents();
+            const f = win.get_focus();
+            const row = f?.get_ancestor?.(Adw.PreferencesRow.$gtype);
+            if (row?.title)
+                tabRows.push(row.title);
+            if (row === simple._lowBatteryExpander)
+                break;
+        }
+        assertDeepEqual(
+            tabRows,
+            [
+                'Power Mode',
+                'When the Lid Closes',
+                'With an External Display',
+                'Screen Blank',
+                'Automatic Suspend',
+                'Suspend Delay',
+                'When Battery Is Low',
+            ],
+            'Tab focus sequence traverses Power Source Settings rows in exact visual order'
+        );
+
+        // Activate When Battery Is Low expander via keyboard and Tab through its nested controls
+        simple._lowBatteryExpander.activate();
+        waitForWindowLayout(win, simple._lowProfileRow);
+        assertEqual(simple._lowBatteryExpander.expanded, true, 'keyboard activate expands When Battery Is Low');
+        const nestedTabRows = [];
+        for (let i = 0; i < 6; i++) {
+            win.child_focus(Gtk.DirectionType.TAB_FORWARD);
+            drainEvents();
+            const f = win.get_focus();
+            const row = f?.get_ancestor?.(Adw.PreferencesRow.$gtype);
+            if (row?.title)
+                nestedTabRows.push(row.title);
+        }
+        assertDeepEqual(
+            nestedTabRows.slice(0, 5),
+            [
+                'Power Mode',
+                'When the Lid Closes',
+                'With an External Display',
+                'Screen Blank',
+                'Automatic Suspend',
+            ],
+            'Tab traverses enabled controls inside expanded When Battery Is Low in order'
+        );
+
+        // Navigate to Advanced tab and back via view switcher buttons
+        const findWidget = (w, pred) => {
+            if (!w)
+                return null;
+            if (pred(w))
+                return w;
+            for (let c = w.get_first_child?.(); c; c = c.get_next_sibling?.()) {
+                const res = findWidget(c, pred);
+                if (res)
+                    return res;
+            }
+            return null;
+        };
+        const advTabBtn = findWidget(
+            win,
+            w => w.constructor.name.includes('ViewSwitcherButton') && w.label === 'Advanced'
+        );
+        const simpleTabBtn = findWidget(
+            win,
+            w => w.constructor.name.includes('ViewSwitcherButton') && w.label === 'Power Source Settings'
+        );
+        assertTrue(Boolean(advTabBtn && simpleTabBtn), 'both top-level page tabs exist in window switcher');
+        advTabBtn.grab_focus();
+        advTabBtn.emit('clicked');
+        waitForWindowLayout(win, adv._profileRow);
+        assertEqual(win.get_visible_page(), ctrl.advancedPage, 'activating Advanced tab opens Advanced page');
+        simpleTabBtn.grab_focus();
+        simpleTabBtn.emit('clicked');
+        waitForWindowLayout(win, simple._profileRow);
+        assertEqual(
+            win.get_visible_page(),
+            ctrl.powerSourcePage,
+            'activating Power Source Settings tab returns to Power Source Settings'
+        );
+    } finally {
+        if (gtkSettings && typeof prevAnimations === 'boolean')
+            gtkSettings.gtk_enable_animations = prevAnimations;
+    }
+
+    // 14d. Fallback Gtk.ToggleButton switcher + 360px + Large Text (125% GNOME Large Text scale)
+    const display = Gdk.Display.get_default();
+    const largeTextCss = new Gtk.CssProvider();
+    largeTextCss.load_from_string('window { font-size: 125%; }');
+    if (display) {
+        Gtk.StyleContext.add_provider_for_display(
+            display,
+            largeTextCss,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER
+        );
+    }
+    try {
+        ctrl.setNarrowLayout(true);
+        drainEvents();
+
+        const measureMinWidth = w => w.measure(Gtk.Orientation.HORIZONTAL, -1)[0];
+        assertTrue(
+            measureMinWidth(simple._sourceHeadingLabel) <= 336,
+            `large-text 360px heading minWidth (${measureMinWidth(simple._sourceHeadingLabel)}px) <= 336px`
+        );
+        assertTrue(
+            measureMinWidth(simple._sourceSwitcher.widget) <= 336,
+            `large-text 360px ToggleGroup minWidth (${measureMinWidth(simple._sourceSwitcher.widget)}px) <= 336px`
+        );
+        assertTrue(
+            measureMinWidth(simple._lowIdleTimeoutRow) <= 336,
+            `large-text 360px inherited low-battery delay row minWidth (${measureMinWidth(simple._lowIdleTimeoutRow)}px) <= 336px`
+        );
+
+        // Fallback linked Gtk.ToggleButton switcher test (older Libadwaita path)
+        const fbWin = new Adw.PreferencesWindow();
+        const fbCtrl = new PreferencesWindowController(settings, fbWin, {
+            gnomePowerSettings: gnomePower,
+            probeCapabilities: async () => makeBaseCaps({ onBattery: true }),
+            forceFallbackSwitcher: true,
+        });
+        fbCtrl.initialize();
+        fbWin.present();
+        waitForWindowLayout(fbWin, fbCtrl.powerSourceController._profileRow);
+
+        const fbSimple = fbCtrl.powerSourceController;
+        assertEqual(fbSimple._sourceSwitcher.isFallback, true, 'fallback switcher path active');
+        assertEqual(
+            fbSimple._sourceSwitcher.widget.accessible_role,
+            Gtk.AccessibleRole.GROUP,
+            'fallback switcher uses GROUP accessible role'
+        );
+
+        fbCtrl.setNarrowLayout(true);
+        drainEvents();
+        assertTrue(
+            measureMinWidth(fbSimple._sourceSwitcher.widget) <= 336,
+            `large-text 360px fallback switcher minWidth (${measureMinWidth(fbSimple._sourceSwitcher.widget)}px) <= 336px`
+        );
+
+        // Fallback switcher focus stability: programmatic selectSource never steals focus
+        fbSimple._profileRow.grab_focus();
+        drainEvents();
+        fbSimple.selectSource('ac', { userInitiated: true });
+        drainEvents();
+        assertEqual(
+            fbWin.get_focus(),
+            fbSimple._profileRow,
+            'fallback switcher selectSource never steals focus from focused row'
+        );
+
+        // Clicking fallback toggle keeps focus on it and updates editingSource
+        const fbBtnBattery = fbSimple._sourceSwitcher.widget.get_first_child();
+        fbBtnBattery.grab_focus();
+        fbBtnBattery.emit('clicked');
+        drainEvents();
+        assertEqual(fbSimple.editingSource, 'battery', 'fallback button click selects battery');
+        assertEqual(fbWin.get_focus(), fbBtnBattery, 'fallback button click keeps focus on button');
+
+        fbCtrl.destroy();
+        fbWin.destroy();
+    } finally {
+        if (display)
+            Gtk.StyleContext.remove_provider_for_display(display, largeTextCss);
+    }
+
+    ctrl.destroy();
+    win.destroy();
 })();
 
 if (failed > 0) {
