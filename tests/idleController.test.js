@@ -23,11 +23,14 @@ function assertEqual(actual, expected, label) {
     console.error(`FAIL [${label}]: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
 }
 
-function makeFakeSettings(initial) {
+function makeFakeSettings(initial, { unsetKeys = [] } = {}) {
+    const defaults = { ...initial };
     const store = { ...initial };
+    const userSet = new Set(Object.keys(initial).filter(k => !unsetKeys.includes(k)));
     const writable = new Map();
     let nextId = 1;
     const listeners = new Map();
+    const resetCalls = [];
 
     const emit = key => {
         for (const { signal, cb } of listeners.values()) {
@@ -37,11 +40,23 @@ function makeFakeSettings(initial) {
     };
 
     const api = {
+        resetCalls,
         is_writable(key) {
             return writable.has(key) ? writable.get(key) : true;
         },
         setWritable(key, flag) {
             writable.set(key, flag);
+        },
+        get_user_value(key) {
+            return userSet.has(key) ? store[key] : null;
+        },
+        reset(key) {
+            if (!api.is_writable(key))
+                return;
+            resetCalls.push(key);
+            userSet.delete(key);
+            store[key] = defaults[key];
+            emit(key);
         },
         get_string(key) {
             return String(store[key] ?? '');
@@ -50,6 +65,7 @@ function makeFakeSettings(initial) {
             if (!api.is_writable(key))
                 return false;
             store[key] = String(val);
+            userSet.add(key);
             emit(key);
             return true;
         },
@@ -60,6 +76,7 @@ function makeFakeSettings(initial) {
             if (!api.is_writable(key))
                 return false;
             store[key] = Number(val);
+            userSet.add(key);
             emit(key);
             return true;
         },
@@ -70,6 +87,7 @@ function makeFakeSettings(initial) {
             if (!api.is_writable(key))
                 return false;
             store[key] = Number(val);
+            userSet.add(key);
             emit(key);
             return true;
         },
@@ -557,6 +575,120 @@ const sampleConfigs = {
         power.get_int('sleep-inactive-battery-timeout'),
         1800,
         'timeout-only edit updates lowBatTimeout baseline even when idleAction is nothing'
+    );
+})();
+
+// 15. Regression: Low Battery delay-only edit preserves GNOME Settings action relinquishment
+//     (and action-only edit preserves timeout relinquishment)
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings({
+        'sleep-inactive-battery-type': 'suspend',
+        'sleep-inactive-battery-timeout': 1800,
+    });
+    const session = makeFakeSettings({ 'idle-delay': 600 });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    assertEqual(power.get_string('sleep-inactive-battery-type'), 'suspend', 'low-battery applied suspend');
+    assertEqual(power.get_int('sleep-inactive-battery-timeout'), 300, 'low-battery applied 300s');
+
+    // User switches native action to Off in GNOME Settings -> relinquishes lowBatType ONLY
+    power.set_string('sleep-inactive-battery-type', 'nothing');
+    assertEqual(Boolean(readRecoveryState(ext).lowBatTypeRelinquished), true, 'type relinquished');
+
+    // User edits ONLY low-battery-idle-timeout to 600s -> MUST NOT turn action back to suspend!
+    const updatedTimeout = {
+        ...sampleConfigs,
+        'low-battery': { ...sampleConfigs['low-battery'], idleTimeout: 600 },
+    };
+    idle.applyForState('low-battery', updatedTimeout, { forceLowBatteryTimeout: true });
+    assertEqual(
+        power.get_string('sleep-inactive-battery-type'),
+        'nothing',
+        'delay-only edit preserves GNOME Settings Off action'
+    );
+    assertEqual(
+        power.get_int('sleep-inactive-battery-timeout'),
+        600,
+        'delay-only edit updates Low Battery timeout to 600s'
+    );
+    assertEqual(
+        Boolean(readRecoveryState(ext).lowBatTypeRelinquished),
+        true,
+        'type relinquishment remains set after delay-only edit'
+    );
+
+    // Reverse: relinquish timeout externally, then edit ONLY low-battery-idle-action -> preserves timeout!
+    power.set_int('sleep-inactive-battery-timeout', 1200);
+    const updatedAction = {
+        ...updatedTimeout,
+        'low-battery': { ...updatedTimeout['low-battery'], idleAction: 'hibernate' },
+    };
+    idle.applyForState('low-battery', updatedAction, { forceLowBatteryAction: true });
+    assertEqual(
+        power.get_string('sleep-inactive-battery-type'),
+        'hibernate',
+        'action-only edit reclaims action'
+    );
+    assertEqual(
+        power.get_int('sleep-inactive-battery-timeout'),
+        1200,
+        'action-only edit preserves externally edited timeout 1200s'
+    );
+    idle.destroy();
+})();
+
+// 16. Regression: Inherited (unset) GNOME defaults are restored via reset(), not pinned as user values
+(() => {
+    const ext = makeDefaultExtSettings();
+    const power = makeFakeSettings(
+        {
+            'sleep-inactive-battery-type': 'suspend',
+            'sleep-inactive-battery-timeout': 900,
+        },
+        { unsetKeys: ['sleep-inactive-battery-type', 'sleep-inactive-battery-timeout'] }
+    );
+    const session = makeFakeSettings({ 'idle-delay': 300 }, { unsetKeys: ['idle-delay'] });
+
+    const idle = new IdleController(ext, { powerSettings: power, sessionSettings: session });
+    assertEqual(session.get_user_value('idle-delay'), null, 'idle-delay starts unset');
+
+    idle.applyForState('low-battery', sampleConfigs, { stateChanged: true });
+    assertEqual(session.get_uint('idle-delay'), 60, 'override wrote 60');
+    assertEqual(session.get_user_value('idle-delay'), 60, 'override temporarily set user value');
+    assertEqual(readRecoveryState(ext).idleDelay?.baselineUnset, true, 'journal recorded baselineUnset');
+
+    // Explicit Preferences edit to Battery timeout clears baselineUnset for that key only
+    idle.syncExplicitNativeAutoSuspend(
+        'battery',
+        { idleAction: 'suspend', idleTimeout: 1800 },
+        'timeout'
+    );
+    assertEqual(
+        readRecoveryState(ext).lowBatTimeout?.baselineUnset,
+        undefined,
+        'explicit Battery timeout edit clears baselineUnset'
+    );
+
+    idle.destroy();
+    assertEqual(session.get_uint('idle-delay'), 300, 'idle-delay restored to default 300');
+    assertEqual(session.get_user_value('idle-delay'), null, 'idle-delay reset back to unset (not pinned)');
+    assertEqual(session.resetCalls.includes('idle-delay'), true, 'idle-delay restored via reset()');
+    assertEqual(
+        power.get_user_value('sleep-inactive-battery-type'),
+        null,
+        'untouched unset battery type restored via reset()'
+    );
+    assertEqual(
+        power.get_int('sleep-inactive-battery-timeout'),
+        1800,
+        'explicitly edited battery timeout restored to explicit 1800'
+    );
+    assertEqual(
+        power.get_user_value('sleep-inactive-battery-timeout'),
+        1800,
+        'explicitly edited battery timeout stays user-set'
     );
 })();
 

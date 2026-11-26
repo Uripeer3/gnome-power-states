@@ -14,6 +14,14 @@ test: compile-schemas check-syntax
 	gjs -m tests/policyEngine.test.js
 	gjs -m tests/lidController.test.js
 	gjs -m tests/idleController.test.js
+	gjs -m tests/integration.test.js
+	@if [ -n "$$DISPLAY" ] || [ -n "$$WAYLAND_DISPLAY" ]; then \
+		gjs -m tests/prefs.test.js; \
+	elif command -v xvfb-run >/dev/null 2>&1; then \
+		xvfb-run -a gjs -m tests/prefs.test.js; \
+	else \
+		echo "SKIP: tests/prefs.test.js (no DISPLAY/WAYLAND_DISPLAY or xvfb-run)"; \
+	fi
 
 check-syntax:
 	@for f in lib/*.js; do \
@@ -23,6 +31,9 @@ check-syntax:
 		out="$$(gjs -m "$$f" 2>&1 || true)"; \
 		if printf '%s\n' "$$out" | grep -qi "SyntaxError"; then \
 			echo "SYNTAX ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
+		fi; \
+		if ! printf '%s\n' "$$out" | grep -q "Unable to load file from: resource:///org/gnome/"; then \
+			echo "UNEXPECTED LOAD ERROR in $$f:"; printf '%s\n' "$$out"; exit 1; \
 		fi; \
 		python3 scripts/check-imports.py "$$f" || exit 1; \
 	done

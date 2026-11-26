@@ -90,8 +90,8 @@ For a detailed breakdown of active processes, `systemd-logind` / UPower / Polkit
 ```text
 gnome-power-states/
 ├── metadata.json                # GNOME 45–51+, user + unlock-dialog session modes
-├── extension.js                 # Thin lifecycle orchestrator (zero UI/Quick Settings edits)
-├── prefs.js                     # Libadwaita single-page UI (scoped state bar + global guardrails)
+├── extension.js                 # Thin GNOME Shell entry point (zero UI/Quick Settings edits)
+├── prefs.js                     # Thin GNOME Shell Preferences entry point
 ├── docs/
 │   └── architecture.md          # Active processes, D-Bus/Polkit flows, and upstream GNOME mapping
 ├── schemas/
@@ -99,20 +99,24 @@ gnome-power-states/
 ├── scripts/
 │   └── check-imports.py         # Relative import & runtime module checker (excluded from pack ZIP)
 ├── lib/
-│   ├── policyEngine.js          # Pure, unit-tested state, transition, lid, and conflict logic
+│   ├── runtime.js               # Core event/reconciliation orchestrator (GJS-testable)
+│   ├── prefsController.js       # Libadwaita responsive single-page UI controller (GJS-testable)
+│   ├── policyEngine.js          # Pure, unit-tested state, power-source, transition, lid, and conflict logic
 │   ├── upowerWatcher.js         # DisplayDevice + ALL LINE_POWER devices + hotplug signals
 │   ├── profileController.js     # PowerProfiles D-Bus + Quick Settings override detection + lap retry
 │   ├── lidController.js         # Unprivileged login1 FD inhibitor + LidClosed + DisplayConfig check
 │   ├── idleController.js        # Native gsd-power sync + idle-delay baseline snapshot/restore
 │   ├── mprisHelper.js           # Best-effort MPRIS Pause on PrepareForSleep(true)
 │   ├── capabilities.js          # Hardware & daemon capability prober
-│   ├── configStore.js           # Typed GSettings readers & schema-safe fallbacks
+│   ├── configStore.js           # Typed GSettings readers, schema-safe fallbacks & message formatter
 │   ├── dbusXml.js               # Self-contained D-Bus interface definitions
 │   └── upowerConfig.js          # Read-only /etc/UPower/UPower.conf parser
 └── tests/
     ├── policyEngine.test.js     # Pure policy-engine unit tests
     ├── lidController.test.js    # Lid, undock, and controller regression tests
-    └── idleController.test.js   # Idle/auto-suspend recovery & baseline sync regression tests
+    ├── idleController.test.js   # Idle/auto-suspend recovery & baseline sync regression tests
+    ├── integration.test.js      # End-to-end runtime + settings-handler integration tests
+    └── prefs.test.js            # GTK4 / Libadwaita Preferences smoke & narrow-layout tests
 ```
 
 ---

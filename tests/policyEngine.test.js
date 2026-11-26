@@ -2,10 +2,12 @@
 // Unit tests for lib/policyEngine.js runnable directly with: gjs -m tests/policyEngine.test.js
 
 import {
+    UPOWER_DEVICE_STATE,
     UPOWER_WARNING,
     detectPolicyConflicts,
     isPowerReadingComplete,
     resolveLidDecision,
+    resolvePowerSource,
     resolvePowerState,
     resolveProfileTransition,
     resolveSleepAction,
@@ -363,6 +365,98 @@ test('detectPolicyConflicts: flags blank >= suspend and battery lid nothing', ()
         subMinute[0]?.message.includes('30 s'),
         true,
         'sub-minute Automatic Suspend duration formats in seconds instead of 0/1 min'
+    );
+});
+
+// 7. Shared power-source resolution (stuck USB-C PD vs Mains AC)
+test('resolvePowerSource: reconciles stuck UCSI adapter with DisplayDevice.State', () => {
+    const stuckUcsi = resolvePowerSource({
+        linePowerDevices: [
+            { path: '/org/freedesktop/UPower/devices/line_power_AC', online: false },
+            {
+                path: '/org/freedesktop/UPower/devices/line_power_ucsi_source_psy_USBC000o002',
+                online: true,
+            },
+        ],
+        rootOnBattery: false,
+        displayState: UPOWER_DEVICE_STATE.DISCHARGING,
+    });
+    assertEqual(stuckUcsi.known, true, 'stuck UCSI reading is known');
+    assertEqual(stuckUcsi.onBattery, true, 'stuck UCSI resolves to battery when discharging');
+
+    const heavyLoadMains = resolvePowerSource({
+        linePowerDevices: [
+            { path: '/org/freedesktop/UPower/devices/line_power_AC', online: true },
+        ],
+        rootOnBattery: false,
+        displayState: UPOWER_DEVICE_STATE.DISCHARGING,
+    });
+    assertEqual(heavyLoadMains.known, true, 'heavy-load Mains reading is known');
+    assertEqual(heavyLoadMains.onBattery, false, 'online Mains AC stays AC under heavy load');
+
+    const chargingUcsi = resolvePowerSource({
+        linePowerDevices: [
+            {
+                path: '/org/freedesktop/UPower/devices/line_power_ucsi_source_psy_USBC000o002',
+                online: true,
+            },
+        ],
+        rootOnBattery: false,
+        displayState: UPOWER_DEVICE_STATE.CHARGING,
+    });
+    assertEqual(chargingUcsi.known, true, 'charging UCSI reading is known');
+    assertEqual(chargingUcsi.onBattery, false, 'charging UCSI resolves to AC');
+});
+
+// 8. Hibernate conflict warnings match the active controller path & polkit challenge
+test('detectPolicyConflicts: tailors hibernate warning for lid vs idle and challenge auth', () => {
+    const idleOnly = detectPolicyConflicts(
+        'low-battery',
+        { lidAction: 'suspend', idleAction: 'hibernate', idleTimeout: 300, screenBlank: 60 },
+        { sleepMode: 'suspend' },
+        { canHibernate: false, canSuspend: true }
+    );
+    const idleWarn = idleOnly.find(w => w.code === 'hibernate-unsupported');
+    assertEqual(Boolean(idleWarn), true, 'idle-only hibernate emits warning');
+    assertEqual(
+        idleWarn.message.includes('may not fall back to Standby'),
+        true,
+        'idle-only hibernate warning does not promise Standby fallback'
+    );
+    assertEqual(
+        idleWarn.message.includes('Lid close will fall back'),
+        false,
+        'idle-only hibernate warning does not mention lid fallback'
+    );
+
+    const lidOnly = detectPolicyConflicts(
+        'battery',
+        { lidAction: 'hibernate', idleAction: 'suspend', idleTimeout: 900, screenBlank: 300 },
+        { sleepMode: 'suspend' },
+        { canHibernate: false, hibernateRequiresAuth: true, canSuspend: true }
+    );
+    const lidWarn = lidOnly.find(w => w.code === 'hibernate-unsupported');
+    assertEqual(
+        lidWarn?.message.includes('requires authentication'),
+        true,
+        'challenge hibernate explains authentication requirement'
+    );
+    assertEqual(
+        lidWarn?.message.includes('Lid close will fall back to Standby'),
+        true,
+        'lid-only hibernate explains lid Standby fallback'
+    );
+
+    const s2hAuth = detectPolicyConflicts(
+        'battery',
+        { lidAction: 'suspend', idleAction: 'nothing', idleTimeout: 900, screenBlank: -1 },
+        { sleepMode: 'suspend-then-hibernate' },
+        { canSuspend: true, canSuspendThenHibernate: false, suspendThenHibernateRequiresAuth: true }
+    );
+    assertEqual(
+        s2hAuth.some(w => w.code === 'sleep-mode-fallback' && w.message.includes('requires authentication')),
+        true,
+        'challenge suspend-then-hibernate explains auth requirement'
     );
 });
 

@@ -486,6 +486,7 @@ function makeFakeLoginProxy() {
     let externalChanges = 0;
     let lapRetries = 0;
     let holdReleases = 0;
+    let deferredByHold = 0;
     const applied = [];
     const dbusCalls = [];
 
@@ -501,6 +502,9 @@ function makeFakeLoginProxy() {
         },
         onExternalHoldReleased: () => {
             holdReleases++;
+        },
+        onWriteDeferredByHold: () => {
+            deferredByHold++;
         },
         dbusCall: (_entry, profile, done) => {
             dbusCalls.push({ profile, done });
@@ -723,6 +727,39 @@ function makeFakeLoginProxy() {
         makePropsChangedVariant({ ActiveProfile: new GLib.Variant('s', 'performance') })
     );
     assertEqual(externalChanges, extBefore + 3, 'manual click after no-op write expiry is detected as external');
+
+    // Regression: clearQueuedWrite() cancels queued target before in-flight write completes
+    const callsBeforeClear = dbusCalls.length;
+    prof.setProfile('power-saver', { notifyStateLabel: 'Low Battery' });
+    prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
+    assertEqual(prof.clearQueuedWrite(), true, 'clearQueuedWrite reports queued write cleared');
+    dbusCalls[dbusCalls.length - 1].done(null);
+    assertEqual(
+        dbusCalls.length,
+        callsBeforeClear + 1,
+        'cleared queued write is NOT dispatched after in-flight write finishes'
+    );
+
+    // Regression: arriving external app hold blocks draining a non-user-edited queued write
+    const callsBeforeHold = dbusCalls.length;
+    const deferredBefore = deferredByHold;
+    prof.setProfile('balanced', { notifyStateLabel: 'On Battery' });
+    prof.setProfile('performance', { notifyStateLabel: 'Plugged In' });
+    legacyEntry.proxy.ActiveProfileHolds = [
+        { ApplicationId: new GLib.Variant('s', 'com.feralinteractive.GameMode') },
+    ];
+    dbusCalls[dbusCalls.length - 1].done(null);
+    assertEqual(
+        dbusCalls.length,
+        callsBeforeHold + 1,
+        'queued write is NOT dispatched once an external app hold is active'
+    );
+    assertEqual(
+        deferredByHold,
+        deferredBefore + 1,
+        'blocked queued write notifies onWriteDeferredByHold so it replays after hold release'
+    );
+    legacyEntry.proxy.ActiveProfileHolds = [];
 
     prof.destroy();
 })();
@@ -1019,8 +1056,8 @@ function makeFakeLoginProxy() {
 
     const recoveredProxy = {
         g_name_owner: ':1.3',
-        CanSuspendRemote(cb) { cb(['yes'], null); },
-        CanHibernateRemote(cb) { cb(['yes'], null); },
+        CanSuspendRemote(cb) { cb(['inhibited'], null); },
+        CanHibernateRemote(cb) { cb(['challenge'], null); },
         CanHybridSleepRemote(cb) { cb(['no'], null); },
         CanSuspendThenHibernateRemote(cb) { cb(['yes'], null); },
     };
@@ -1030,9 +1067,11 @@ function makeFakeLoginProxy() {
     });
     drainMicrotasks();
     assertEqual(recCaps.login1Probed, true, 'recovered login1 probe succeeds');
-    assertEqual(recCaps.canSuspend, true, 'recovered canSuspend=true');
-    assertEqual(recCaps.canHibernate, true, 'recovered canHibernate=true');
-    assertEqual(recCaps.canSuspendThenHibernate, true, 'recovered canSuspendThenHibernate=true');
+    assertEqual(recCaps.canSuspend, true, 'inhibited answer counts as unattended-supported');
+    assertEqual(recCaps.suspendRequiresAuth, false, 'inhibited does not set suspendRequiresAuth');
+    assertEqual(recCaps.canHibernate, false, 'challenge answer is NOT unattended-supported');
+    assertEqual(recCaps.hibernateRequiresAuth, true, 'challenge answer sets hibernateRequiresAuth=true');
+    assertEqual(recCaps.canSuspendThenHibernate, true, 'yes answer sets canSuspendThenHibernate=true');
 })();
 
 if (failed > 0) {
