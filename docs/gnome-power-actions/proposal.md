@@ -42,29 +42,29 @@ Where the current layout falls short for the laptop/dock case:
 #### What stays put
 
 - **General** keeps global hardware and live state controls: battery status/health/charging limits, **Current Power Mode**, **Power Button Behavior**, and **Show Battery Percentage**.
-- **Power Saving** keeps global display-saving controls (**Automatic Screen Brightness** and **Dim Screen**).
-- Each native setting should have **one editing destination** rather than being duplicated in both **Power Saving** and **Power Actions** (see the phased rollout section below for handling global **Screen Blank** in an initial step).
+- **Power Saving** keeps global display-saving controls (**Automatic Screen Brightness**, **Dim Screen**, and global **Screen Blank** until per-source screen blanking exists natively). Keeping **Power Actions** as a dedicated subpage prevents users from assuming global display controls change when switching between **Plugged In** and **On Battery**.
+- Each native setting has **one editing destination** rather than being duplicated in both **Power Saving** and **Power Actions**.
 
 #### Entry point in Power Saving
 
 Add a single navigation row in **Power Saving**:
 
 - **Title:** `Power Actions`
-- **Subtitle:** `Choose what happens when the lid closes or the laptop is idle`
+- **Subtitle:** `Power mode, lid close, and automatic suspend`
 
-The copy is intentionally neutral and task-focused rather than repeating power-source mechanics in the subtitle.
+The copy is concise, neutral across laptops and desktops, and names the exact behaviors controlled inside.
 
 #### Figure 1: Power Saving entry point (desktop)
 
-![Desktop GNOME Settings showing the Power panel on the Power Saving view with Automatic Screen Brightness, Dim Screen, and the Power Actions navigation row](images/power-saving.png)
+![Desktop GNOME Settings showing the Power panel on the Power Saving view with Automatic Screen Brightness, Dim Screen, Screen Blank, and the Power Actions navigation row](images/power-saving.png)
 
-*Description:* Desktop layout of GNOME Settings with **Power** selected in the sidebar and **Power Saving** active in the header switcher. The top boxed list keeps **Automatic Screen Brightness** and **Dim Screen**. Below it is a single navigation row titled **Power Actions**, subtitled **"Choose what happens when the lid closes or the laptop is idle"**, with a disclosure chevron.
+*Description:* Desktop layout of GNOME Settings with **Power** selected in the sidebar and **Power Saving** active in the header switcher. The top boxed list keeps global display controls (**Automatic Screen Brightness**, **Dim Screen**, and **Screen Blank** set to **5 minutes**). Below it is a single navigation row titled **Power Actions**, subtitled **"Power mode, lid close, and automatic suspend"**, with a disclosure chevron.
 
 #### Figure 2: Power Saving entry point (narrow / 360px)
 
-![Narrow 360px layout of the Power Saving view with bottom General and Power Saving view switcher and the Power Actions row](images/power-saving-narrow.png)
+![Narrow 360px layout of the Power Saving view with back button, bottom General and Power Saving view switcher, global display rows, and the Power Actions row](images/power-saving-narrow.png)
 
-*Description:* Compact 360px layout of **Power Saving**. The sidebar collapses, the **General** / **Power Saving** switcher moves to the bottom bar, and the **Power Actions** row wraps cleanly under **Automatic Screen Brightness** and **Dim Screen**.
+*Description:* Compact 360px layout of **Power Saving**. The sidebar collapses behind the top-left back button, the **General** / **Power Saving** switcher moves to the bottom bar, and **Power Actions** wraps cleanly below **Automatic Screen Brightness**, **Dim Screen**, and **Screen Blank**.
 
 ---
 
@@ -76,31 +76,31 @@ Activating **Power Actions** pushes a navigation page structured around two peer
   - `Edit Settings For` uses a segmented toggle (`Plugged In` | `On Battery`) to answer *"Which settings am I editing?"*.
   - On opening, the selector initializes to the laptop's actual active power source when reliably known (with a deterministic fallback when unknown).
   - Once open, the selected editing tab **never changes automatically** during plug/unplug events, hardware probe updates, or low-battery transitions—preventing focus or context from jumping mid-edit.
-  - A separate, non-interactive status caption underneath (e.g., `Currently plugged in`, omitted if unknown) answers *"What is the laptop using right now?"*. Browsing either tab never writes settings or activates a power profile.
+  - A separate, non-interactive dimmed status caption underneath (e.g., `Currently plugged in`, omitted if unknown) answers *"What is the laptop using right now?"*. Browsing either tab never writes settings or activates a power profile.
 - **Symmetrical primary rows:** Both **Plugged In** and **On Battery** present the same groups in the same order, with one primary control per row:
-  1. **Power Mode** — transition rule (`When connecting to power` / `When switching to battery power`), proposed fresh default **Keep Current Mode** for both sources.
+  1. **Power Mode** — transition rule (`When connecting to power` / `When switching to battery power`), proposed fresh default **Keep Current Mode** for both sources, accompanied by a concise caption (*"Applied when power changes. Manual changes stay active until the next change."*).
   2. **Lid Close** — **When the Lid Closes** and **With an External Display**.
-  3. **Screen and Suspend** — **Screen Blank**, **Automatic Suspend**, and **Suspend Delay** (with **Suspend Delay** insensitive when **Automatic Suspend** is turned off).
+  3. **Suspend** — **Automatic Suspend** and **Suspend Delay** (with **Suspend Delay** insensitive when **Automatic Suspend** is turned off, using GNOME's standard duration labels such as `15 minutes` and `1 hour` without a redundant `"After"` prefix).
 - **Thoughtful hardware and capability adaptation:** Hide **Lid Close** on devices without a lid; hide **With an External Display** when its outcomes would not differ from the main lid action; hide or adapt **Power Mode** when no power-profiles backend is available; omit the **Plugged In** / **On Battery** selector on AC-only desktops. If a user already configured a non-preset timeout or an unusual action via `dconf`, display the real value accurately and preserve it when editing neighboring rows.
-- **Nested low-battery exception with honest inheritance:** Under **On Battery** only, a **When Battery Is Low** expander row summarizes only the effective differences from ordinary battery behavior (for example, `Automatic Power Saver`, or `Automatic Power Saver · suspend after 5 minutes`). Inheritance wording such as `Same as On Battery` is used only where a setting genuinely inherits from **On Battery** rather than inferring inheritance from two equal values. Editing **When Battery Is Low** never modifies ordinary **On Battery** settings.
+- **Nested low-battery exception with honest inheritance:** Under **On Battery** only, a **When Battery Is Low** expander row summarizes only the effective differences from ordinary battery behavior when collapsed (for example, `Automatic Power Saver`, or `Automatic Power Saver · suspend after 5 minutes`). Inheritance wording such as `Same as On Battery` is used only where a setting genuinely inherits from **On Battery** rather than inferring inheritance from two equal values. Editing **When Battery Is Low** never modifies ordinary **On Battery** settings. (When ordinary **Automatic Suspend** on battery is turned off, the low-battery delay row should either clarify `Off (Same as On Battery)` or allow opting into a low-battery suspend delay explicitly.)
 
 #### Figure 3: Plugged In view (desktop)
 
-![Desktop Power Actions subpage with Plugged In selected, showing Currently plugged in status, Power Mode, Lid Close, and Screen and Suspend groups](images/plugged-in.png)
+![Desktop Power Actions subpage with Plugged In selected, showing Currently plugged in status, Power Mode, Lid Close, and Suspend groups](images/plugged-in.png)
 
-*Description:* Desktop layout inside **Power Actions** with **Plugged In** selected in `Edit Settings For` and `Currently plugged in` underneath. **Power Mode** (`When connecting to power`) is set to **Keep Current Mode**. Under **Lid Close**, **When the Lid Closes** is **Suspend** and **With an External Display** is **Keep Running**. Under **Screen and Suspend**, **Screen Blank** is **After 15 minutes**, **Automatic Suspend** is off, and **Suspend Delay** (**After 1 hour**) is insensitive.
+*Description:* Desktop layout inside **Power Actions** with **Plugged In** selected in `Edit Settings For` and `Currently plugged in` underneath. **Power Mode** (`When connecting to power`) is set to **Keep Current Mode**, followed by the transition caption. Under **Lid Close**, **When the Lid Closes** is **Suspend** and **With an External Display** is **Keep Running**. Under **Suspend**, **Automatic Suspend** is off and **Suspend Delay** (**1 hour**) is insensitive.
 
 #### Figure 4: On Battery view with nested Low Battery (desktop)
 
 ![Desktop Power Actions subpage with On Battery selected while currently plugged in, showing expanded When Battery Is Low controls](images/on-battery.png)
 
-*Description:* Desktop layout of **Power Actions** with **On Battery** selected while the status caption still reads `Currently plugged in`, showing offline editing of the inactive source. **Power Mode** (`When switching to battery power`) shows **Balanced** as an illustrative configured value (fresh installs would default to **Keep Current Mode**). **Lid Close** preserves the same two rows. **Screen and Suspend** shows **Screen Blank** (**After 5 minutes**), **Automatic Suspend** on, and **Suspend Delay** (**After 15 minutes**). At the bottom, the expanded **When Battery Is Low** row summarizes `Automatic Power Saver` in its subtitle and reveals the **Automatic Power Saver** switch (on) and low-battery **Suspend Delay** (`Same as On Battery`).
+*Description:* Desktop layout of **Power Actions** with **On Battery** selected while the status caption still reads `Currently plugged in`, showing offline editing of the inactive source. **Power Mode** (`When switching to battery power`) shows **Balanced** as an illustrative configured value (fresh installs would default to **Keep Current Mode**). **Lid Close** preserves the same two rows. **Suspend** shows **Automatic Suspend** on and **Suspend Delay** (**15 minutes**). At the bottom, the expanded **When Battery Is Low** row reveals the **Automatic Power Saver** switch (on) and low-battery **Suspend Delay** (`Same as On Battery`).
 
 #### Figure 5: On Battery view (narrow / 360px)
 
 ![Narrow 360px layout of Power Actions with On Battery selected and When Battery Is Low expanded](images/on-battery-narrow.png)
 
-*Description:* Compact 360px layout of **Power Actions**. The sidebar collapses behind the back button, `Edit Settings For` (**Plugged In** | **On Battery**) stays full-width at the top with `Currently plugged in` below it, and every single-control row stacks cleanly without narrow side-by-side inputs.
+*Description:* Compact 360px layout of **Power Actions**. The sidebar collapses behind the back button, `Edit Settings For` (**Plugged In** | **On Battery**) stays full-width at the top with `Currently plugged in` below it, and every single-control row—including the expanded **When Battery Is Low** section—stacks cleanly without narrow side-by-side inputs or clipping.
 
 ---
 

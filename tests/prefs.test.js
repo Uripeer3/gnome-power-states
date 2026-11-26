@@ -600,7 +600,7 @@ function makeBaseCaps(overrides = {}) {
     simple.selectSource('ac', { userInitiated: true });
     adv.selectState('ac');
     assertEqual(getSelectedLabel(simple._idleActionRow), 'Suspend', 'simple AC idle action synced');
-    assertEqual(getSelectedLabel(simple._idleTimeoutRow), 'After 20 min', 'simple AC idle delay synced');
+    assertEqual(getSelectedLabel(simple._idleTimeoutRow), '20 minutes', 'simple AC idle delay synced');
     assertEqual(getSelectedLabel(adv._idleActionDropDown), 'Suspend', 'Advanced AC idle action synced');
     assertEqual(getSelectedLabel(adv._idleTimeoutDropDown), 'After 20 min', 'Advanced AC idle delay synced');
 
@@ -647,7 +647,7 @@ function makeBaseCaps(overrides = {}) {
         true,
         'low-battery Suspend Delay enabled when Low Battery Automatic Suspend is Suspend'
     );
-    selectByLabel(simple._lowIdleTimeoutRow, 'After 5 min');
+    selectByLabel(simple._lowIdleTimeoutRow, '5 minutes');
     drainEvents();
 
     assertEqual(gnomePower.writes.length, 0, 'low-battery idle edits never touch native gsd-power');
@@ -809,7 +809,7 @@ function makeBaseCaps(overrides = {}) {
     // Extra native action ('blank') shows actual name and offers route to Advanced
     assertEqual(getSelectedLabel(simple._idleActionRow), 'Blank Screen', 'extra native action shown by name');
     assertEqual(simple._idleAdvancedRouteRow.visible, true, 'Edit in Advanced route shown for extra native action');
-    assertEqual(getSelectedLabel(simple._idleTimeoutRow), 'After 7 min 30 s', 'non-preset 450s timeout shown exactly');
+    assertEqual(getSelectedLabel(simple._idleTimeoutRow), '7 min 30 s', 'non-preset 450s timeout shown exactly');
 
     // Activating Edit in Advanced navigates to Advanced page on AC without writing settings
     const writesBeforeRoute = gnomePower.writes.length;
@@ -836,13 +836,13 @@ function makeBaseCaps(overrides = {}) {
     );
     assertEqual(
         getSelectedLabel(simple._idleTimeoutRow),
-        'After 17 min',
+        '17 minutes',
         'custom 1020s native timeout shown exactly'
     );
 
     // Editing Delay while Action is locked/hibernate preserves Action and only writes timeout
     gnomePower.writes.length = 0;
-    selectByLabel(simple._idleTimeoutRow, 'After 30 min');
+    selectByLabel(simple._idleTimeoutRow, '30 minutes');
     drainEvents();
     assertEqual(
         gnomePower.get_string('sleep-inactive-battery-type'),
@@ -1022,12 +1022,12 @@ function makeBaseCaps(overrides = {}) {
     const adv = ctrl.advancedController;
     adv.selectState('battery');
 
-    // Both pages show ordinary battery baseline (15 min = 900s), NOT the temporary 300s override
-    assertEqual(getSelectedLabel(simple._idleTimeoutRow), 'After 15 min', 'simple shows 900s battery baseline');
+    // Both pages show ordinary battery baseline (15 minutes = 900s), NOT the temporary 300s override
+    assertEqual(getSelectedLabel(simple._idleTimeoutRow), '15 minutes', 'simple shows 900s battery baseline');
     assertEqual(getSelectedLabel(adv._idleTimeoutDropDown), 'After 15 min', 'Advanced shows 900s battery baseline');
 
-    // Edit ordinary battery timeout to 20 min (1200s) in Power Source Settings during Low Battery
-    selectByLabel(simple._idleTimeoutRow, 'After 20 min');
+    // Edit ordinary battery timeout to 20 minutes (1200s) in Power Source Settings during Low Battery
+    selectByLabel(simple._idleTimeoutRow, '20 minutes');
     drainEvents();
 
     assertEqual(
@@ -1035,7 +1035,7 @@ function makeBaseCaps(overrides = {}) {
         300,
         'active Low Battery native override stays 300s'
     );
-    assertEqual(getSelectedLabel(simple._idleTimeoutRow), 'After 20 min', 'simple shows updated 1200s baseline');
+    assertEqual(getSelectedLabel(simple._idleTimeoutRow), '20 minutes', 'simple shows updated 1200s baseline');
     assertEqual(getSelectedLabel(adv._idleTimeoutDropDown), 'After 20 min', 'Advanced shows updated 1200s baseline');
 
     // Exit Low Battery (back to normal On Battery) -> restores 1200s!
@@ -1082,13 +1082,13 @@ function makeBaseCaps(overrides = {}) {
     const simple = ctrl.powerSourceController;
     simple._lowBatteryExpander.expanded = true;
 
-    // Inheriting native 15 min must display 15 min (not stored local 8 min)
+    // Inheriting native 15 min must display 15 minutes (not stored local 8 min)
     assertEqual(simple._lowIdleTimeoutRow.visible, true, 'inherited active delay row is visible');
     assertEqual(simple._lowIdleTimeoutRow.sensitive, false, 'inherited active delay row is disabled');
     assertEqual(
         getSelectedLabel(simple._lowIdleTimeoutRow),
-        'After 15 min',
-        'inherited low-battery delay shows actual effective native 15 min instead of local 8 min'
+        '15 minutes',
+        'inherited low-battery delay shows actual effective native 15 minutes instead of local 8 min'
     );
     assertEqual(
         simple._lowIdleTimeoutRow.subtitle,
@@ -1106,8 +1106,8 @@ function makeBaseCaps(overrides = {}) {
     drainEvents();
     assertEqual(
         getSelectedLabel(simple._lowIdleTimeoutRow),
-        'After 20 min',
-        'inherited low-battery delay tracks native battery timeout update to 20 min'
+        '20 minutes',
+        'inherited low-battery delay tracks native battery timeout update to 20 minutes'
     );
     assertEqual(
         settings.get_int('low-battery-idle-timeout'),
@@ -1127,8 +1127,8 @@ function makeBaseCaps(overrides = {}) {
     assertEqual(simple._lowIdleTimeoutRow.sensitive, true, 'explicit Suspend enables low-battery delay row');
     assertEqual(
         getSelectedLabel(simple._lowIdleTimeoutRow),
-        'After 8 min',
-        'explicit Suspend displays preserved stored independent 8 min delay'
+        '8 minutes',
+        'explicit Suspend displays preserved stored independent 8 minutes delay'
     );
 
     // Switching back to inherited when On Battery is Off omits the delay row
@@ -1147,14 +1147,14 @@ function makeBaseCaps(overrides = {}) {
         'low-battery action choice accurately displays Same as Battery (Off)'
     );
 
-    // Switching back to explicit Suspend re-shows row with preserved 8 min delay
+    // Switching back to explicit Suspend re-shows row with preserved 8 minutes delay
     selectByLabel(simple._lowIdleActionRow, 'Suspend');
     drainEvents();
     assertEqual(simple._lowIdleTimeoutRow.visible, true, 'explicit Suspend re-shows delay row');
     assertEqual(
         getSelectedLabel(simple._lowIdleTimeoutRow),
-        'After 8 min',
-        'preserved independent 8 min delay survives Off-inheritance round trip'
+        '8 minutes',
+        'preserved independent 8 minutes delay survives Off-inheritance round trip'
     );
 
     ctrl.destroy();
