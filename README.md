@@ -18,6 +18,12 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 
 ## Features (v1)
 
+### Two-Page Preferences (`Power Source Settings` + `Advanced`)
+Both pages edit the same policy keys and stay live-synced with each other and with GNOME Settings; browsing pages or switching power sources never writes settings or activates profiles.
+
+- **Power Source Settings (default page)**: GNOME-facing editor with **On Battery** and **Plugged In** peer selectors, identical group and row ordering, one primary control per row, a separate live current-source status indicator (omitted when unknown), and a nested **When Battery Is Low** detail view with an accurate summary of effective differences.
+- **Advanced**: Full per-state editor (`Plugged In` | `On Battery` | `Low Battery`), global **Lid-Close Sleep Mode**, **Low Battery Level**, collapsible **Advanced** options, inline conflict banner, and explanatory info popovers.
+
 ### Per-State Policies (`Plugged In` | `On Battery` | `Low Battery`)
 - **Power Mode**: Automatically switch between *Performance*, *Balanced*, *Power Saver*, or *Keep Current Mode* via `power-profiles-daemon` or `tuned-ppd`.
 - **When Laptop Lid Closes (Zero Root)**: Choose *Suspend*, *Do Nothing*, *Lock Screen*, *Turn Off Screen*, or *Hibernate* independently per power state using an unprivileged `systemd-logind` `handle-lid-switch` session inhibitor.
@@ -93,14 +99,18 @@ gnome-power-states/
 ├── extension.js                 # Thin GNOME Shell entry point (zero UI/Quick Settings edits)
 ├── prefs.js                     # Thin GNOME Shell Preferences entry point
 ├── docs/
-│   └── architecture.md          # Active processes, D-Bus/Polkit flows, and upstream GNOME mapping
+│   ├── architecture.md          # Active processes, D-Bus/Polkit flows, and upstream GNOME mapping
+│   └── preferences-design.md    # Design spec for Power Source Settings and Advanced views
 ├── schemas/
 │   └── org.gnome.shell.extensions.power-states.gschema.xml
 ├── scripts/
 │   └── check-imports.py         # Relative import & runtime module checker (excluded from pack ZIP)
 ├── lib/
 │   ├── runtime.js               # Core event/reconciliation orchestrator (GJS-testable)
-│   ├── prefsController.js       # Libadwaita responsive single-page UI controller (GJS-testable)
+│   ├── prefsWindow.js           # Two-page Libadwaita PreferencesWindow orchestrator
+│   ├── prefsModel.js            # Shared preferences model, formatting, and canonical read/commit logic
+│   ├── powerSourcePage.js       # GNOME-facing Power Source Settings page controller
+│   ├── prefsController.js       # Advanced preferences page controller (preserves d3dfcc0 UI)
 │   ├── policyEngine.js          # Pure, unit-tested state, power-source, transition, lid, and conflict logic
 │   ├── upowerWatcher.js         # DisplayDevice + ALL LINE_POWER devices + hotplug signals
 │   ├── profileController.js     # PowerProfiles D-Bus + Quick Settings override detection + lap retry

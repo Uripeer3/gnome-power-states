@@ -10,6 +10,7 @@ import GLib from 'gi://GLib';
 
 import { SCHEMA_ID } from '../lib/configStore.js';
 import { UPOWER_DEVICE_STATE, UPOWER_WARNING } from '../lib/policyEngine.js';
+import { PrefsModel } from '../lib/prefsModel.js';
 import { PowerStatesRuntime } from '../lib/runtime.js';
 
 let passed = 0;
@@ -444,6 +445,114 @@ function makeHarness({
         null,
         'disable reset originally-unset idle-delay instead of pinning it'
     );
+})();
+
+// 6. Integration: Shared PrefsModel edit path with live PowerStatesRuntime
+//    - Editing battery lid while on AC preserves active AC policy
+//    - Editing ordinary battery timeout during Low Battery override updates baseline & restores on exit
+//    - Delay-only edit preserves external change to native action
+(() => {
+    const h = makeHarness({
+        configure: s => {
+            s.set_string('ac-lid-action', 'nothing');
+            s.set_string('battery-lid-action', 'suspend');
+            s.set_string('low-battery-idle-action', 'suspend');
+            s.set_int('low-battery-idle-timeout', 300);
+        },
+    });
+
+    const model = new PrefsModel(h.extSettings, {
+        gnomePowerSettings: h.powerSettings,
+        probeCapabilities: async () => ({
+            lidIsPresent: true,
+            onBattery: false,
+            powerSourceKnown: true,
+            warningLevel: UPOWER_WARNING.NONE,
+            percentage: 85,
+            login1Probed: true,
+            canSuspend: true,
+            canHibernate: false,
+            canHybridSleep: false,
+            canSuspendThenHibernate: false,
+            availableProfiles: ['power-saver', 'balanced', 'performance'],
+            hasPowerProfiles: true,
+        }),
+    });
+
+    // Start on AC
+    h.upowerProxy.OnBattery = false;
+    h.reconcile({ isInitialStartup: true });
+    assertEqual(
+        h.runtime._lastLidDecision?.actionOnClose,
+        'nothing',
+        'active AC lid decision is nothing'
+    );
+
+    // Edit battery lid action via shared PrefsModel while plugged in -> active AC policy unchanged
+    model.setLidAction('battery', 'lock');
+    assertEqual(
+        h.extSettings.get_string('battery-lid-action'),
+        'lock',
+        'shared model persisted battery-lid-action=lock'
+    );
+    assertEqual(
+        h.runtime._lastLidDecision?.actionOnClose,
+        'nothing',
+        'editing battery lid while plugged in leaves active AC lid policy untouched'
+    );
+
+    // Enter Low Battery -> 300s override applied; ordinary battery baseline is 900s
+    h.upowerProxy.OnBattery = true;
+    h.displayProxy.State = UPOWER_DEVICE_STATE.DISCHARGING;
+    h.displayProxy.WarningLevel = UPOWER_WARNING.LOW;
+    h.displayProxy.Percentage = 14;
+    h.reconcile();
+    assertEqual(h.powerSettings.get_int('sleep-inactive-battery-timeout'), 300, 'Low Battery applied 300s');
+    assertEqual(
+        model.readExactIdleState('battery').timeout,
+        900,
+        'shared model reads 900s ordinary battery baseline during Low Battery override'
+    );
+
+    // Edit ordinary battery timeout to 1200s during Low Battery override via shared commit path
+    model.commitIdleControl('battery', 'timeout', { actionId: 'suspend', timeoutValue: 1200 });
+    assertEqual(
+        h.powerSettings.get_int('sleep-inactive-battery-timeout'),
+        300,
+        'Low Battery active native timeout remains 300s'
+    );
+    assertEqual(
+        model.readExactIdleState('battery').timeout,
+        1200,
+        'shared model now reflects updated 1200s ordinary battery baseline'
+    );
+
+    // Exit Low Battery -> restores 1200s
+    h.displayProxy.WarningLevel = UPOWER_WARNING.NONE;
+    h.displayProxy.Percentage = 50;
+    h.reconcile();
+    assertEqual(
+        h.powerSettings.get_int('sleep-inactive-battery-timeout'),
+        1200,
+        'exiting Low Battery restored edited 1200s ordinary battery baseline'
+    );
+
+    // External native action change to hibernate + delay-only edit preserves hibernate
+    h.powerSettings.set_string('sleep-inactive-ac-type', 'hibernate');
+    model.commitIdleControl('ac', 'timeout', { actionId: 'hibernate', timeoutValue: 1800 });
+    assertEqual(
+        h.powerSettings.get_string('sleep-inactive-ac-type'),
+        'hibernate',
+        'delay-only shared commit preserves external native action'
+    );
+    assertEqual(
+        h.powerSettings.get_int('sleep-inactive-ac-timeout'),
+        1800,
+        'delay-only shared commit updated native timeout to 1800s'
+    );
+
+    model.destroy();
+    h.runtime.disable();
 })();
 
 drainMicrotasks();
