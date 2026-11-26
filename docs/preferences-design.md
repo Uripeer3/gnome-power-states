@@ -10,7 +10,7 @@ A laptop owner should be able to say “At my desk I close the lid and keep work
 
 In GNOME Settings 51.1, Power has General and Power Saving views. General presents the current Power Mode and hardware controls. Power Saving already has a screen blank delay, an Automatic Power Saver option on supported systems, and separate battery and AC suspend settings. In the full native proposal, **Power → Power Source Settings** opens the source editor below. The extension opens directly into that editor. The Advanced page belongs only to the extension.
 
-Use **On Battery** and **Plugged In** as peer selectors. Use the same groups and row order for both so the user can find the lid setting in the same place. The selector answers “Which settings am I editing?” A separate, accessible status such as “Currently plugged in” answers “What is the laptop using?” Initialize from a reliable reading, allow either source to be edited offline, and keep focus and the chosen source stable during probe completion, hotplug, and low-battery transitions. With an unknown reading, omit the status and use a deterministic editing source.
+Use **Plugged In** and **On Battery** as peer selectors. Use the same groups and row order for both so the user can find the lid setting in the same place. The selector answers “Which settings am I editing?” A separate, accessible status such as “Currently plugged in” answers “What is the laptop using?” Initialize from a reliable reading, allow either source to be edited offline, and keep focus and the chosen source stable during probe completion, hotplug, and low-battery transitions. With an unknown reading, omit the status and use a deterministic editing source.
 
 | Group or row | Behavior in the proposed editor |
 | --- | --- |

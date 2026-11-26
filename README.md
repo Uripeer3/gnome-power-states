@@ -21,7 +21,7 @@ Power States deliberately **does not touch GNOME Quick Settings** and **never en
 ### Two-Page Preferences (`Power Source Settings` + `Advanced`)
 Both pages edit the same policy keys and stay live-synced with each other and with GNOME Settings; browsing pages or switching power sources never writes settings or activates profiles.
 
-- **Power Source Settings (default page)**: GNOME-facing editor with **On Battery** and **Plugged In** peer selectors, identical group and row ordering, one primary control per row, a separate live current-source status indicator (omitted when unknown), and a nested **When Battery Is Low** detail view with an accurate summary of effective differences.
+- **Power Source Settings (default page)**: GNOME-facing editor with **Plugged In** and **On Battery** peer selectors, identical group and row ordering, one primary control per row, a separate live current-source status indicator (omitted when unknown), and a nested **When Battery Is Low** detail view with an accurate summary of effective differences.
 - **Advanced**: Full per-state editor (`Plugged In` | `On Battery` | `Low Battery`), global **Lid-Close Sleep Mode**, **Low Battery Level**, collapsible **Advanced** options, inline conflict banner, and explanatory info popovers.
 
 ### Per-State Policies (`Plugged In` | `On Battery` | `Low Battery`)

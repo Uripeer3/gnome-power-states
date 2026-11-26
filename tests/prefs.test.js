@@ -1604,24 +1604,26 @@ function makeBaseCaps(overrides = {}) {
         }
         assertEqual(toggleButtons.length, 2, 'source switcher exposes 2 toggle buttons');
 
-        // Focus On Battery toggle -> Right arrow moves to Plugged In -> activate keeps focus on Plugged In
-        toggleButtons[0].grab_focus();
-        drainEvents();
-        simple._sourceSwitcher.widget.child_focus(Gtk.DirectionType.RIGHT);
-        drainEvents();
-        assertEqual(win.get_focus(), toggleButtons[1], 'Right arrow moves keyboard focus to Plugged In toggle');
-        toggleButtons[1].emit('clicked');
-        drainEvents();
-        assertEqual(simple.editingSource, 'ac', 'activating Plugged In toggle switches editing source to ac');
-        assertEqual(win.get_focus(), toggleButtons[1], 'activating Plugged In toggle keeps focus on it');
+        const [pluggedInButton, batteryButton] = toggleButtons;
 
-        // Back to On Battery via Left arrow + activate
+        // Focus On Battery toggle -> Left arrow moves to Plugged In -> activate keeps focus on Plugged In
+        batteryButton.grab_focus();
+        drainEvents();
         simple._sourceSwitcher.widget.child_focus(Gtk.DirectionType.LEFT);
         drainEvents();
-        toggleButtons[0].emit('clicked');
+        assertEqual(win.get_focus(), pluggedInButton, 'Left arrow moves keyboard focus to Plugged In toggle');
+        pluggedInButton.emit('clicked');
+        drainEvents();
+        assertEqual(simple.editingSource, 'ac', 'activating Plugged In toggle switches editing source to ac');
+        assertEqual(win.get_focus(), pluggedInButton, 'activating Plugged In toggle keeps focus on it');
+
+        // Back to On Battery via Right arrow + activate
+        simple._sourceSwitcher.widget.child_focus(Gtk.DirectionType.RIGHT);
+        drainEvents();
+        batteryButton.emit('clicked');
         waitForWindowLayout(win, simple._lowBatteryExpander);
         assertEqual(simple.editingSource, 'battery', 'activating On Battery toggle switches back to battery');
-        assertEqual(win.get_focus(), toggleButtons[0], 'activating On Battery toggle keeps focus on it');
+        assertEqual(win.get_focus(), batteryButton, 'activating On Battery toggle keeps focus on it');
 
         // Tab forward from switcher visits expected rows in order and reaches When Battery Is Low
         const tabRows = [];
@@ -1780,7 +1782,7 @@ function makeBaseCaps(overrides = {}) {
         );
 
         // Clicking fallback toggle keeps focus on it and updates editingSource
-        const fbBtnBattery = fbSimple._sourceSwitcher.widget.get_first_child();
+        const fbBtnBattery = fbSimple._sourceSwitcher.widget.get_last_child();
         fbBtnBattery.grab_focus();
         fbBtnBattery.emit('clicked');
         drainEvents();
