@@ -54,7 +54,7 @@ Where the current layout falls short:
 
 #### What stays put
 
-- **General** keeps global hardware and live state controls: battery status/health/charging limits, **Current Power Mode**, **Power Button Behavior**, and **Show Battery Percentage**.
+- **General** keeps global hardware and live state controls: battery status/health/charging limits, **Power Mode** (current active mode), **Power Button Behavior**, and **Show Battery Percentage**.
 - **Power Saving** keeps global display-saving controls (**Automatic Screen Brightness**, **Dim Screen**, and global **Screen Blank** until per-source screen blanking exists natively).
 - Each native setting has **one editing destination** rather than being duplicated in both **Power Saving** and **Power Actions**.
 
