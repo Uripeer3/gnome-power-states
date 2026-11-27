@@ -140,17 +140,6 @@ Because a GNOME Shell extension cannot modify `gnome-control-center`, `gnome-set
 
 ---
 
-## 6. Readiness for Upstream GNOME / GitLab Contribution
+## 6. Proposed preferences and upstream integration
 
-### What Is Ready Now (Design Proposal)
-The **UI model and interaction philosophy** are in strong shape for a **GNOME Design proposal** (`Teams/Design/settings-mockups`) and discussion on `gnome-settings-daemon#715` and `gnome-control-center#1223`:
-- **Scoped `Adw.ToggleGroup` (`Plugged In | On Battery | Low Battery`)** keeps global settings global (solving KDE PowerDevil's 3× repetition of hardware controls) while making per-state behavior scannable in one Libadwaita page.
-- **Plain-language GNOME HIG copy**, **single-row Automatic Suspend** (with Delay grayed out when Off and stacking cleanly at narrow widths), **explicit external-display outcomes** (*"With an External Display"*: *Keep Running* / *Use Lid Close Action*), and **opt-in `"Keep Current Mode"` / `"Use System Setting"`** defaults fit GNOME's design culture well.
-- **"Transition defaults, not hard locks"** directly answers Bastien Nocera's objection in `gnome-control-center#1600` (that users plugged into AC may still want quiet operation or manual overrides without the system fighting them).
-
-### What Should Happen Before Filing Upstream Code MRs
-1. **Dogfood this v1 extension on real hardware first** (actual lid close/open cycles, suspend/resume, dock hotplug, unplug-while-closed, low-battery transitions, and lock-screen behavior across a week or two of daily use) so every real-world edge case is proven, not theoretical.
-2. **Start upstream with Design + `gsd-power`, not a `gnome-control-center` MR:**
-   - Upstream maintainers explicitly stated (`gnome-control-center#1600`) that **`gnome-settings-daemon#715`** must be settled before Settings UI merges.
-   - Lid-close (`gnome-control-center#1223` / `gsd#712`) needs agreement from GNOME Design + `gsd-power` maintainers on ownership (`gsd-power` vs `systemd-logind`) and the external-monitor edge cases.
-3. **Strip extension-only knobs from the upstream mockup:** For an upstream GNOME Settings pitch, omit the technical `ⓘ` popovers, `Unplug Delay When Closed`, `Transition Notifications`, `Custom` Low Battery %, and `Leave Unchanged` on Screen Blank (assuming native per-state `idle-delay` keys) — keeping the upstream pitch razor-thin and unmistakably GNOME.
+The proposed preferences window opens with a GNOME-facing power source editor and offers the current full interface under Advanced. Both pages edit the same stored policy. The design covers low-battery overrides, native Settings ownership, compatibility, implementation stages and acceptance tests. [Power Source Settings and Advanced preferences](preferences-design.md)
