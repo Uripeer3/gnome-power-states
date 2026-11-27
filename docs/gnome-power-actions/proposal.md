@@ -63,15 +63,15 @@ Where the current layout falls short:
 Add a single navigation row in **Power Saving**:
 
 - **Title:** `Power Actions`
-- **Subtitle:** `Power mode, lid close, and automatic suspend`
+- **Subtitle:** `Automatic suspend, lid behavior, and power mode switching`
 
-The copy is concise, neutral across laptops and desktops, and names the exact behaviors controlled inside.
+The copy puts the moved **Automatic Suspend** setting first for discoverability and distinguishes **power mode switching** from the live **Power Mode** control on **General**.
 
 #### Figure 1: Power Saving entry point (desktop)
 
 ![Desktop GNOME Settings showing the Power panel on the Power Saving view with Automatic Screen Brightness, Dim Screen, Screen Blank, and the Power Actions navigation row](images/power-saving.png)
 
-*Description:* Desktop layout of GNOME Settings with **Power** selected in the sidebar and **Power Saving** active in the header switcher. The top boxed list keeps global display controls (**Automatic Screen Brightness**, **Dim Screen**, and **Screen Blank** set to **5 minutes**). Below it is a single navigation row titled **Power Actions**, subtitled **"Power mode, lid close, and automatic suspend"**, with a disclosure chevron.
+*Description:* Desktop layout of GNOME Settings with **Power** selected in the sidebar and **Power Saving** active in the header switcher. The top boxed list keeps global display controls (**Automatic Screen Brightness**, **Dim Screen**, and **Screen Blank** set to **5 minutes**). Below it is a single navigation row titled **Power Actions**, subtitled **"Automatic suspend, lid behavior, and power mode switching"**, with a disclosure chevron.
 
 #### Figure 2: Power Saving entry point (narrow / 360px)
 
